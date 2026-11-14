@@ -1,0 +1,36 @@
+name: Fix layout
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Repair file paths
+        run: |
+          git ls-files -z | while IFS= read -r -d '' f; do
+            n=$(printf '%s' "$f" | sed -e 's#/ #/#g' -e 's#^ ##')
+            n=$(printf '%s' "$n" | sed -e 's#^android/app/src/main/res/ic_#android/app/src/main/res/drawable/ic_#' -e 's#^lib/services/state/#lib/state/#')
+            if [ "$f" != "$n" ]; then
+              echo "move: [$f] -> [$n]"
+              mkdir -p "$(dirname "$n")"
+              git mv "$f" "$n"
+            fi
+          done
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          if git diff --cached --quiet; then
+            echo "Nothing to fix."
+          else
+            git commit -m "Fix folder layout"
+            git push
+          fi

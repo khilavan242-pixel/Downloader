@@ -5,17 +5,22 @@ import 'package:flutter/foundation.dart';
 import '../models/download_task.dart';
 import '../models/quality.dart';
 import '../models/save_folder.dart';
+import '../services/history_store.dart';
 import '../services/native_bridge.dart';
 import '../services/settings_store.dart';
 import '../utils/url_utils.dart';
 
-/// Single source of UI state: current selection, saved folders and the task
-/// list. Downloads themselves run natively (foreground service), this class
-/// only mirrors their state and forwards user intent.
+/// Single source of UI state: current selection, saved folders and the
+/// download list. Downloads run natively (foreground service); this class
+/// mirrors their state, remembers finished items and forwards user intent.
 class DownloadController extends ChangeNotifier {
-  DownloadController({required NativeBridge bridge, required SettingsStore settings})
-      : _bridge = bridge,
-        _settings = settings {
+  DownloadController({
+    required NativeBridge bridge,
+    required SettingsStore settings,
+    required HistoryStore history,
+  })  : _bridge = bridge,
+        _settings = settings,
+        _history = history {
     _kind = settings.kind;
     _quality = settings.qualityFor(_kind);
     _playlist = settings.playlist;
@@ -23,7 +28,9 @@ class DownloadController extends ChangeNotifier {
 
   final NativeBridge _bridge;
   final SettingsStore _settings;
+  final HistoryStore _history;
   StreamSubscription<Map<dynamic, dynamic>>? _sub;
+  Timer? _saveTimer;
 
   late MediaKind _kind;
   late QualityOption _quality;
@@ -31,6 +38,7 @@ class DownloadController extends ChangeNotifier {
   SaveFolder? _folder;
   List<SaveFolder> _folders = const [];
   final Map<String, DownloadTask> _tasks = {};
+  final Set<String> _missing = {};
   int _idCounter = 0;
 
   /// One-shot messages for the UI to show (snackbar).
@@ -42,27 +50,92 @@ class DownloadController extends ChangeNotifier {
   bool get playlist => _playlist;
   SaveFolder? get folder => _folder;
   List<SaveFolder> get folders => _folders;
-
-  /// Newest first.
-  List<DownloadTask> get tasks => _tasks.values.toList().reversed.toList();
-  int get activeCount => _tasks.values.where((t) => t.status.isActive).length;
-  bool get hasFinished => _tasks.values.any((t) => t.status.isFinished);
-
   List<QualityOption> get qualityOptions => QualityOption.forKind(_kind);
+
+  // ---- lists for the Downloads page ---------------------------------------
+
+  /// Running and waiting items, in queue order.
+  List<DownloadTask> get active => _tasks.values.where((t) => t.status.isActive).toList()
+    ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+
+  List<DownloadTask> get completed => _finished((t) => t.status == TaskStatus.completed);
+
+  List<DownloadTask> get failed => _finished(
+        (t) => t.status == TaskStatus.failed || t.status == TaskStatus.cancelled,
+      );
+
+  /// Everything that is not running, newest first.
+  List<DownloadTask> get finished => _finished((t) => t.status.isFinished);
+
+  /// Active items first, then finished ones, newest first.
+  List<DownloadTask> get everything => [...active, ...finished];
+
+  /// The few most recent items for the home page.
+  List<DownloadTask> get recent => everything.take(3).toList();
+
+  int get activeCount => _tasks.values.where((t) => t.status.isActive).length;
+  int get failedCount => failed.length;
+  int get completedCount => completed.length;
+
+  List<DownloadTask> _finished(bool Function(DownloadTask) test) =>
+      _tasks.values.where(test).toList()..sort((a, b) => b.when.compareTo(a.when));
+
+  /// True when the saved file was deleted or moved outside the app.
+  bool isMissing(DownloadTask t) => _missing.contains(t.id);
+
+  // ---- startup -------------------------------------------------------------
 
   Future<void> init() async {
     _sub = _bridge.events.listen(_onEvent, onError: (Object e) => _say('Event error: $e'));
     await _refreshFolders();
+
+    for (final t in _history.load()) {
+      _tasks[t.id] = t;
+    }
+    final live = <String>{};
     try {
       for (final t in await _bridge.snapshot()) {
-        _tasks[t.id] = t;
+        live.add(t.id);
+        final old = _tasks[t.id];
+        _tasks[t.id] = old == null ? t : _merge(old, t);
       }
-    } catch (_) {/* service not started yet - fine */}
+    } catch (_) {/* nothing running yet */}
+    _markInterrupted(live);
+
     notifyListeners();
     await _takeSharedText();
+    await _checkFiles();
   }
 
-  // ---- selection ---------------------------------------------------------
+  /// Items that were running when the app process died cannot continue.
+  void _markInterrupted(Set<String> live) {
+    for (final t in _tasks.values.toList()) {
+      if (t.status.isActive && !live.contains(t.id)) {
+        _tasks[t.id] = t.copyWith(
+          status: TaskStatus.failed,
+          error: 'Interrupted. Tap retry to download again.',
+          finishedAt: DateTime.now(),
+        );
+      }
+    }
+  }
+
+  Future<void> _checkFiles() async {
+    final done = _tasks.values
+        .where((t) => t.status == TaskStatus.completed && t.fileUri != null)
+        .toList();
+    if (done.isEmpty) return;
+    try {
+      final exists = await _bridge.filesExist(done.map((t) => t.fileUri!).toList());
+      _missing.clear();
+      for (var i = 0; i < done.length && i < exists.length; i++) {
+        if (!exists[i]) _missing.add(done[i].id);
+      }
+      notifyListeners();
+    } catch (_) {/* keep what we know */}
+  }
+
+  // ---- selection -----------------------------------------------------------
 
   void setKind(MediaKind k) {
     if (k == _kind) return;
@@ -84,7 +157,7 @@ class DownloadController extends ChangeNotifier {
     notifyListeners();
   }
 
-  // ---- folders -----------------------------------------------------------
+  // ---- folders -------------------------------------------------------------
 
   Future<void> _refreshFolders() async {
     try {
@@ -124,7 +197,7 @@ class DownloadController extends ChangeNotifier {
     notifyListeners();
   }
 
-  // ---- downloads ---------------------------------------------------------
+  // ---- downloads -----------------------------------------------------------
 
   /// Starts a download for every link found in [text]. Returns how many were queued.
   Future<int> addFromText(String text) async {
@@ -150,6 +223,7 @@ class DownloadController extends ChangeNotifier {
       playlist: _playlist && UrlUtils.hasPlaylist(url),
     );
     _tasks[id] = task;
+    _persistSoon();
     notifyListeners();
     try {
       await _bridge.enqueue(
@@ -161,7 +235,12 @@ class DownloadController extends ChangeNotifier {
         folder: _folder,
       );
     } catch (e) {
-      _tasks[id] = task.copyWith(status: TaskStatus.failed, error: '$e');
+      _tasks[id] = task.copyWith(
+        status: TaskStatus.failed,
+        error: '$e',
+        finishedAt: DateTime.now(),
+      );
+      _persistSoon();
       notifyListeners();
     }
   }
@@ -187,8 +266,71 @@ class DownloadController extends ChangeNotifier {
     notifyListeners();
   }
 
-  void clearFinished() {
-    _tasks.removeWhere((_, t) => t.status.isFinished);
+  // ---- file actions --------------------------------------------------------
+
+  Future<void> play(DownloadTask t) async {
+    final uri = t.fileUri;
+    if (uri == null || _missing.contains(t.id)) {
+      _say('This file is no longer on the device');
+      return;
+    }
+    try {
+      if (!await _bridge.openFile(uri, t.mime)) _say('No app found to play this file');
+    } catch (_) {
+      _say('Could not open the file');
+    }
+  }
+
+  Future<void> share(DownloadTask t) async {
+    final uri = t.fileUri;
+    if (uri == null || _missing.contains(t.id)) {
+      _say('This file is no longer on the device');
+      return;
+    }
+    try {
+      if (!await _bridge.shareFile(uri, t.mime, t.displayTitle)) _say('Could not share the file');
+    } catch (_) {
+      _say('Could not share the file');
+    }
+  }
+
+  /// Deletes the file from the device and removes the item from the list.
+  Future<void> deleteFile(DownloadTask t) async {
+    final uri = t.fileUri;
+    var ok = true;
+    if (uri != null && !_missing.contains(t.id)) {
+      try {
+        ok = await _bridge.deleteFile(uri);
+      } catch (_) {
+        ok = false;
+      }
+    }
+    if (ok) {
+      _drop(t.id);
+      _say('Deleted from device');
+    } else {
+      _say('Could not delete the file');
+    }
+  }
+
+  /// Removes an item from the list but keeps the file.
+  void remove(DownloadTask t) => _drop(t.id);
+
+  /// Clears items from the list (files stay on the device).
+  void clearWhere(bool Function(DownloadTask) test) {
+    final ids = _tasks.values.where((t) => t.status.isFinished && test(t)).map((t) => t.id).toList();
+    for (final id in ids) {
+      _tasks.remove(id);
+      _missing.remove(id);
+    }
+    _persistSoon();
+    notifyListeners();
+  }
+
+  void _drop(String id) {
+    _tasks.remove(id);
+    _missing.remove(id);
+    _persistSoon();
     notifyListeners();
   }
 
@@ -198,10 +340,20 @@ class DownloadController extends ChangeNotifier {
     return v;
   }
 
-  // ---- shared text ("Share -> Tapnab") -----------------------------------
+  /// Lets any widget show a snackbar message.
+  void notice(String message) => _say(message);
+
+  // ---- app lifecycle -------------------------------------------------------
 
   Future<void> onAppResumed() async {
     await _takeSharedText();
+    await _checkFiles();
+  }
+
+  /// Saves the list immediately (called when the app goes to the background).
+  Future<void> flush() async {
+    _saveTimer?.cancel();
+    await _history.save(_tasks.values);
   }
 
   Future<void> _takeSharedText() async {
@@ -211,7 +363,22 @@ class DownloadController extends ChangeNotifier {
     } catch (_) {}
   }
 
-  // ---- native events -----------------------------------------------------
+  // ---- native events -------------------------------------------------------
+
+  DownloadTask _merge(DownloadTask old, DownloadTask incoming) {
+    return old.copyWith(
+      title: incoming.title,
+      status: incoming.status,
+      progress: incoming.progress,
+      etaSeconds: incoming.etaSeconds,
+      error: incoming.error,
+      savedTo: incoming.savedTo,
+      fileUri: incoming.fileUri,
+      fileSize: incoming.fileSize,
+      finishedAt: incoming.status.isFinished ? (old.finishedAt ?? DateTime.now()) : null,
+      clearError: incoming.status != TaskStatus.failed,
+    );
+  }
 
   void _onEvent(Map<dynamic, dynamic> e) {
     if (e['type'] == 'shared') {
@@ -219,23 +386,32 @@ class DownloadController extends ChangeNotifier {
       if (text != null) unawaited(addFromText(text));
       return;
     }
+    if (e['type'] == 'playlist') {
+      // The playlist card is replaced by one card per song.
+      _tasks.remove(e['id']);
+      _say('${e['count']} songs added to the queue');
+      _persistSoon();
+      notifyListeners();
+      return;
+    }
     final incoming = DownloadTask.fromMap(e);
     final existing = _tasks[incoming.id];
     if (existing == null) {
-      _tasks[incoming.id] = incoming;
+      _tasks[incoming.id] = incoming.status.isFinished
+          ? incoming.copyWith(finishedAt: DateTime.now())
+          : incoming;
     } else {
-      // Native sends partial updates; keep what we already know.
-      _tasks[incoming.id] = existing.copyWith(
-        title: incoming.title,
-        status: incoming.status,
-        progress: incoming.progress,
-        etaSeconds: incoming.etaSeconds,
-        error: incoming.error,
-        savedTo: incoming.savedTo,
-        clearError: incoming.status != TaskStatus.failed,
-      );
+      _tasks[incoming.id] = _merge(existing, incoming);
     }
+    _persistSoon();
     notifyListeners();
+  }
+
+  void _persistSoon() {
+    _saveTimer?.cancel();
+    _saveTimer = Timer(const Duration(seconds: 1), () {
+      unawaited(_history.save(_tasks.values));
+    });
   }
 
   void _say(String m) {
@@ -245,6 +421,7 @@ class DownloadController extends ChangeNotifier {
   @override
   void dispose() {
     _sub?.cancel();
+    _saveTimer?.cancel();
     _messages.close();
     super.dispose();
   }

@@ -83,4 +83,22 @@ class NativeBridge {
 
   Future<String?> consumeSharedText() =>
       _methods.invokeMethod<String>('consumeSharedText');
+
+  /// Opens the file in the user's default player. False when no app can play it.
+  Future<bool> openFile(String uri, String mime) async =>
+      (await _methods.invokeMethod<bool>('openFile', {'uri': uri, 'mime': mime})) ?? false;
+
+  Future<bool> shareFile(String uri, String mime, String title) async =>
+      (await _methods.invokeMethod<bool>('shareFile', {'uri': uri, 'mime': mime, 'title': title})) ??
+      false;
+
+  /// Deletes the saved file from the device.
+  Future<bool> deleteFile(String uri) async =>
+      (await _methods.invokeMethod<bool>('deleteFile', {'uri': uri})) ?? false;
+
+  /// For each uri, whether the file can still be opened.
+  Future<List<bool>> filesExist(List<String> uris) async {
+    final raw = await _methods.invokeListMethod<bool>('filesExist', {'uris': uris});
+    return raw ?? List<bool>.filled(uris.length, true);
+  }
 }

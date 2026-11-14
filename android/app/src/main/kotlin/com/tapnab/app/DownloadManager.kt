@@ -6,11 +6,6 @@ import com.yausername.youtubedl_android.YoutubeDL
 import java.io.File
 import java.util.concurrent.Executors
 
-/**
- * Owns the download queue. Lives in the process (not the Activity), so
- * downloads continue while the app is in the background; [DownloadService]
- * keeps the process alive with a foreground notification.
- */
 object DownloadManager {
 
     private const val TAG = "DownloadManager"
@@ -44,7 +39,6 @@ object DownloadManager {
     private val tasks = LinkedHashMap<String, Task>()
     private val executor = Executors.newFixedThreadPool(MAX_PARALLEL)
 
-    /** Set by the Flutter channel; invoked from worker threads. */
     @Volatile var listener: ((Map<String, Any?>) -> Unit)? = null
 
     fun snapshot(): List<Map<String, Any?>> = synchronized(tasks) { tasks.values.map { it.toMap() } }
@@ -66,7 +60,6 @@ object DownloadManager {
     fun cancel(id: String) {
         val t = synchronized(tasks) { tasks[id] } ?: return
         t.cancelled = true
-        // Kills the yt-dlp process if it is running; harmless when it is only queued.
         try {
             YoutubeDL.getInstance().destroyProcessById(id)
         } catch (e: Throwable) {
@@ -79,11 +72,66 @@ object DownloadManager {
         }
     }
 
+    private fun expandPlaylist(context: Context, t: Task): Boolean {
+        t.status = "fetching"
+        emit(t)
+        val entries: List<Pair<String, String>> = try {
+            TapnabApp.awaitReady()
+            val req = com.yausername.youtubedl_android.YoutubeDLRequest(t.url).apply {
+                addOption("--flat-playlist")
+                addOption("--yes-playlist")
+                addOption("--no-warnings")
+                addOption("--print", "%(webpage_url,url,id)s\t%(title)s")
+            }
+            val out = YoutubeDL.getInstance().execute(req, t.id) { _, _, _ -> }.out
+            out.lineSequence().mapNotNull { line ->
+                val parts = line.split('\t', limit = 2)
+                val ref = parts[0].trim()
+                if (ref.isEmpty() || ref == "NA") {
+                    null
+                } else {
+                    val url = if (ref.startsWith("http")) ref else "https://www.youtube.com/watch?v=$ref"
+                    url to parts.getOrNull(1).orEmpty().trim()
+                }
+            }.toList()
+        } catch (e: YoutubeDL.CanceledException) {
+            finish(t, "cancelled")
+            return true
+        } catch (e: Throwable) {
+            Log.w(TAG, "playlist expansion failed, downloading as one task", e)
+            return false
+        }
+
+        if (t.cancelled) {
+            finish(t, "cancelled")
+            return true
+        }
+        if (entries.size < 2) return false
+
+        entries.forEachIndexed { i, (url, title) ->
+            val child = Task(
+                id = "${t.id}-${i + 1}",
+                url = url,
+                kind = t.kind,
+                quality = t.quality,
+                playlist = false,
+                folderUri = t.folderUri,
+            )
+            if (title.isNotEmpty() && title != "NA") child.title = title
+            enqueue(context, child)
+        }
+        synchronized(tasks) { tasks.remove(t.id) }
+        listener?.invoke(mapOf("type" to "playlist", "id" to t.id, "count" to entries.size))
+        DownloadService.refresh()
+        return true
+    }
+
     private fun run(context: Context, t: Task) {
         if (t.cancelled) {
             finish(t, "cancelled")
             return
         }
+        if (t.playlist && expandPlaylist(context, t)) return
         val workDir = File(context.cacheDir, "dl/${t.id}").apply { mkdirs() }
         try {
             t.status = "fetching"

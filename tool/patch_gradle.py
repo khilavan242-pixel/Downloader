@@ -82,7 +82,9 @@ def patch(text: str) -> str:
     text = sub_once(
         r'signingConfig\s*=\s*signingConfigs\.getByName\("debug"\)',
         'signingConfig = if (keystoreProps.getProperty("storeFile") != null) '
-        'signingConfigs.getByName("release") else signingConfigs.getByName("debug")',
+                'signingConfigs.getByName("release") else signingConfigs.getByName("debug")\n'
+        '            isMinifyEnabled = false\n'
+        '            isShrinkResources = false',
         text,
         "release signingConfig",
     )

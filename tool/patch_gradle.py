@@ -73,7 +73,7 @@ def patch(text: str) -> str:
     # ABI filters inside defaultConfig (right after minSdk).
     text = sub_once(
         r"(minSdk = 29\n)",
-        r'\1        ndk {\n            abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86_64")\n        }\n',
+                r'\1',
         text,
         "defaultConfig",
     )

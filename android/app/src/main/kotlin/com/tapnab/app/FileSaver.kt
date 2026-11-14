@@ -16,8 +16,13 @@ import java.io.File
  */
 object FileSaver {
 
-    /** @return human readable destination, e.g. `Music/Tapnab` or the folder name. */
-    fun save(context: Context, source: File, isAudio: Boolean, folderUri: String?): String {
+    /**
+     * @property label human readable destination, e.g. `Music/Tapnab` or the folder name
+     * @property uri content:// address of the saved file (used to play, share, delete)
+     */
+    data class Saved(val label: String, val uri: Uri, val size: Long)
+
+    fun save(context: Context, source: File, isAudio: Boolean, folderUri: String?): Saved {
         val mime = mimeFor(source)
         return if (folderUri != null) {
             saveToTree(context, source, mime, Uri.parse(folderUri))
@@ -26,7 +31,7 @@ object FileSaver {
         }
     }
 
-    private fun saveToTree(context: Context, source: File, mime: String, treeUri: Uri): String {
+    private fun saveToTree(context: Context, source: File, mime: String, treeUri: Uri): Saved {
         val dir = DocumentFile.fromTreeUri(context, treeUri)
         if (dir == null || !dir.exists() || !dir.canWrite()) {
             throw IllegalStateException("The selected folder is no longer available. Pick it again.")
@@ -42,10 +47,10 @@ object FileSaver {
             target.delete()
             throw e
         }
-        return dir.name ?: "selected folder"
+        return Saved(dir.name ?: "selected folder", target.uri, source.length())
     }
 
-    private fun saveToMediaStore(context: Context, source: File, mime: String, isAudio: Boolean): String {
+    private fun saveToMediaStore(context: Context, source: File, mime: String, isAudio: Boolean): Saved {
         val collection = if (isAudio) {
             MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
         } else {
@@ -72,7 +77,7 @@ object FileSaver {
             resolver.delete(uri, null, null)
             throw e
         }
-        return relative
+        return Saved(relative, uri, source.length())
     }
 
     private fun mimeFor(file: File): String = when (file.extension.lowercase()) {

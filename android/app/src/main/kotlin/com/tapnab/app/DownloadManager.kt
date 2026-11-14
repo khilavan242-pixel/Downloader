@@ -6,6 +6,11 @@ import com.yausername.youtubedl_android.YoutubeDL
 import java.io.File
 import java.util.concurrent.Executors
 
+/**
+ * Owns the download queue. Lives in the process (not the Activity), so
+ * downloads continue while the app is in the background; [DownloadService]
+ * keeps the process alive with a foreground notification.
+ */
 object DownloadManager {
 
     private const val TAG = "DownloadManager"
@@ -25,6 +30,8 @@ object DownloadManager {
         @Volatile var title: String? = null
         @Volatile var error: String? = null
         @Volatile var savedTo: String? = null
+        @Volatile var fileUri: String? = null
+        @Volatile var fileSize: Long = -1
         @Volatile var cancelled: Boolean = false
 
         val isAudio get() = kind == "mp3"
@@ -33,12 +40,14 @@ object DownloadManager {
             "id" to id, "url" to url, "kind" to kind, "quality" to quality, "playlist" to playlist,
             "status" to status, "progress" to progress, "eta" to eta,
             "title" to title, "error" to error, "savedTo" to savedTo,
+            "fileUri" to fileUri, "fileSize" to fileSize,
         )
     }
 
     private val tasks = LinkedHashMap<String, Task>()
     private val executor = Executors.newFixedThreadPool(MAX_PARALLEL)
 
+    /** Set by the Flutter channel; invoked from worker threads. */
     @Volatile var listener: ((Map<String, Any?>) -> Unit)? = null
 
     fun snapshot(): List<Map<String, Any?>> = synchronized(tasks) { tasks.values.map { it.toMap() } }
@@ -60,6 +69,7 @@ object DownloadManager {
     fun cancel(id: String) {
         val t = synchronized(tasks) { tasks[id] } ?: return
         t.cancelled = true
+        // Kills the yt-dlp process if it is running; harmless when it is only queued.
         try {
             YoutubeDL.getInstance().destroyProcessById(id)
         } catch (e: Throwable) {
@@ -72,6 +82,13 @@ object DownloadManager {
         }
     }
 
+    /**
+     * Turns a playlist link into one task per song, so each song gets its own
+     * card, progress bar and is saved as soon as it finishes.
+     *
+     * @return true when the task was fully handled here (songs queued, or the
+     *         user cancelled); false to fall back to downloading it as one task.
+     */
     private fun expandPlaylist(context: Context, t: Task): Boolean {
         t.status = "fetching"
         emit(t)
@@ -120,6 +137,7 @@ object DownloadManager {
             if (title.isNotEmpty() && title != "NA") child.title = title
             enqueue(context, child)
         }
+        // The playlist card is replaced by its songs.
         synchronized(tasks) { tasks.remove(t.id) }
         listener?.invoke(mapOf("type" to "playlist", "id" to t.id, "count" to entries.size))
         DownloadService.refresh()
@@ -176,9 +194,11 @@ object DownloadManager {
                 ?.sortedBy { it.name }.orEmpty()
             if (produced.isEmpty()) throw IllegalStateException("No file was produced. Try another quality.")
 
-            var where = ""
-            for (f in produced) where = FileSaver.save(context, f, t.isAudio, t.folderUri)
-            t.savedTo = where
+            var saved: FileSaver.Saved? = null
+            for (f in produced) saved = FileSaver.save(context, f, t.isAudio, t.folderUri)
+            t.savedTo = saved?.label
+            t.fileUri = saved?.uri?.toString()
+            t.fileSize = saved?.size ?: -1
             t.progress = 100.0
             if (t.title == null) t.title = produced.first().nameWithoutExtension
             finish(t, "completed")

@@ -1,6 +1,8 @@
 package com.tapnab.app
 
 import android.Manifest
+import android.content.ActivityNotFoundException
+import android.content.ClipData
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -8,6 +10,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.DocumentsContract
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.yausername.youtubedl_android.YoutubeDL
@@ -131,6 +134,80 @@ class MainActivity : FlutterActivity() {
                     main.post { result.success(version) }
                 } catch (e: Throwable) {
                     main.post { result.error("update_failed", e.message ?: "Update failed", null) }
+                }
+            }
+
+            "openFile" -> {
+                val uri = call.argument<String>("uri")?.let(Uri::parse)
+                if (uri == null) {
+                    result.success(false)
+                    return
+                }
+                val view = Intent(Intent.ACTION_VIEW)
+                    .setDataAndType(uri, call.argument<String>("mime") ?: "*/*")
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                try {
+                    startActivity(view)
+                    result.success(true)
+                } catch (e: ActivityNotFoundException) {
+                    result.success(false)
+                } catch (e: Exception) {
+                    result.success(false)
+                }
+            }
+
+            "shareFile" -> {
+                val uri = call.argument<String>("uri")?.let(Uri::parse)
+                if (uri == null) {
+                    result.success(false)
+                    return
+                }
+                val mime = call.argument<String>("mime") ?: "*/*"
+                val send = Intent(Intent.ACTION_SEND).apply {
+                    type = mime
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    clipData = ClipData.newRawUri("", uri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                try {
+                    startActivity(Intent.createChooser(send, call.argument<String>("title") ?: "Share"))
+                    result.success(true)
+                } catch (e: Exception) {
+                    result.success(false)
+                }
+            }
+
+            "deleteFile" -> {
+                val uri = call.argument<String>("uri")?.let(Uri::parse)
+                if (uri == null) {
+                    result.success(false)
+                    return
+                }
+                thread(name = "delete-file") {
+                    val ok = try {
+                        if (DocumentsContract.isDocumentUri(this, uri)) {
+                            DocumentsContract.deleteDocument(contentResolver, uri)
+                        } else {
+                            contentResolver.delete(uri, null, null) > 0
+                        }
+                    } catch (e: Exception) {
+                        false
+                    }
+                    main.post { result.success(ok) }
+                }
+            }
+
+            "filesExist" -> {
+                val uris = call.argument<List<String>>("uris").orEmpty()
+                thread(name = "files-exist") {
+                    val exists = uris.map { s ->
+                        try {
+                            contentResolver.openFileDescriptor(Uri.parse(s), "r")?.use { true } ?: false
+                        } catch (e: Exception) {
+                            false
+                        }
+                    }
+                    main.post { result.success(exists) }
                 }
             }
 

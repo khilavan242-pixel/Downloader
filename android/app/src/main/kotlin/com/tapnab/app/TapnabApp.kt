@@ -7,11 +7,6 @@ import com.yausername.youtubedl_android.YoutubeDL
 import java.util.concurrent.CountDownLatch
 import kotlin.concurrent.thread
 
-/**
- * Initialises the bundled yt-dlp / FFmpeg once per process. Extraction of the
- * Python runtime takes a moment on first launch, so it happens off the main
- * thread and workers wait on [awaitReady] before running.
- */
 class TapnabApp : Application() {
 
     override fun onCreate() {
@@ -38,10 +33,22 @@ class TapnabApp : Application() {
         var initError: Throwable? = null
             private set
 
-        /** Blocks the calling (worker) thread until the engine is usable. */
         fun awaitReady() {
             ready.await()
-            initError?.let { throw IllegalStateException("Download engine failed to start: ${it.message}", it) }
+            initError?.let {
+                throw IllegalStateException("Download engine failed to start: ${describe(it)}", it)
+            }
+        }
+
+        private fun describe(t: Throwable): String {
+            val parts = mutableListOf<String>()
+            var cur: Throwable? = t
+            while (cur != null && parts.size < 3) {
+                val msg = cur.message?.takeIf { it.isNotBlank() }
+                parts += if (msg != null) "${cur.javaClass.simpleName}: $msg" else cur.javaClass.simpleName
+                cur = cur.cause
+            }
+            return parts.joinToString(" <- ")
         }
     }
 }

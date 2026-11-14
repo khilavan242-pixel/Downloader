@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'services/history_store.dart';
 import 'services/native_bridge.dart';
 import 'services/settings_store.dart';
 import 'state/download_controller.dart';
-import 'ui/home_screen.dart';
+import 'ui/app_shell.dart';
+import 'ui/theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -13,7 +15,12 @@ Future<void> main() async {
     systemNavigationBarColor: Colors.transparent,
   ));
   final settings = await SettingsStore.open();
-  final controller = DownloadController(bridge: NativeBridge(), settings: settings);
+  final history = await HistoryStore.open();
+  final controller = DownloadController(
+    bridge: NativeBridge(),
+    settings: settings,
+    history: history,
+  );
   await controller.init();
   runApp(TapnabApp(controller: controller));
 }
@@ -23,31 +30,15 @@ class TapnabApp extends StatelessWidget {
 
   final DownloadController controller;
 
-  static ThemeData _theme(Brightness b) {
-    final scheme = ColorScheme.fromSeed(seedColor: const Color(0xFFE53935), brightness: b);
-    return ThemeData(
-      useMaterial3: true,
-      colorScheme: scheme,
-      cardTheme: CardThemeData(
-        elevation: 0,
-        color: scheme.surfaceContainerHigh,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      ),
-      inputDecorationTheme: InputDecorationTheme(
-        border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)),
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Tapnab',
       debugShowCheckedModeBanner: false,
-      theme: _theme(Brightness.light),
-      darkTheme: _theme(Brightness.dark),
+      theme: buildTheme(Brightness.light),
+      darkTheme: buildTheme(Brightness.dark),
       themeMode: ThemeMode.system,
-      home: HomeScreen(controller: controller),
+      home: AppShell(controller: controller),
     );
   }
 }

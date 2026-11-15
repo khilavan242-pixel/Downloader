@@ -21,7 +21,7 @@ A simple Android downloader that runs entirely on your phone. No account, no API
 ## Features
 
 - **Pop-up over YouTube:** Share → Tapnab opens a small window right over YouTube. Pick MP3/MP4 and quality, tap Download, and you are back in YouTube.
-- **Browse tab:** YouTube inside Tapnab. A floating **Download** button appears on any video or playlist.
+- **Browse tab:** full-screen YouTube inside Tapnab. Floating **Download** and **Play on TV** buttons appear on any video or playlist.
 - **MP3 or MP4**, with quality listed from low to high:
   - MP3: 64 · 96 · 128 · 192 · 256 · 320 kbps
   - MP4: 144p · 240p · 360p · 480p · 720p · 1080p · 1440p · 2160p · Best available
@@ -31,6 +31,7 @@ A simple Android downloader that runs entirely on your phone. No account, no API
 - **Cover art and tags** in MP3 files (thumbnail as album art).
 - **Downloads manager** like a browser's: All / Active / Done / Failed, grouped by date, search, sort, MP3/MP4 filter.
 - **Select many:** long-press to select, then **Play** in your music player, Share, Delete or Retry together.
+- **Play on TV (DLNA):** cast to a smart TV or set-top box on the same Wi-Fi. Play a YouTube video or playlist straight from Tapnab (no ads, nothing downloaded), or cast saved files; lists play back to back with pause / next / stop controls. Works with any DLNA "MediaRenderer".
 - **Duplicate detection:** warns before downloading the same video twice.
 - **Choose where files go**, like in Acode: saved folder list, tap to select, ✕ to forget, "Select folder" to add one. Works with internal storage, SD cards and **USB pendrives**.
 - **Settings:** Wi-Fi only, parallel downloads, file names, cover art, playlist folders, theme (system / light / dark).

@@ -6,14 +6,22 @@ import '../state/download_controller.dart';
 import '../utils/url_utils.dart';
 import 'download_tile.dart';
 import 'folder_picker_sheet.dart';
+import 'info_dialogs.dart';
+import 'link_actions.dart';
 import 'logo_mark.dart';
 import 'theme.dart';
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key, required this.controller, required this.onOpenDownloads});
+  const HomePage({
+    super.key,
+    required this.controller,
+    required this.onOpenDownloads,
+    required this.onOpenSettings,
+  });
 
   final DownloadController controller;
   final VoidCallback onOpenDownloads;
+  final VoidCallback onOpenSettings;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -30,14 +38,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    c.incoming.addListener(_onIncoming);
+    _onIncoming();
     _checkClipboard();
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    c.incoming.removeListener(_onIncoming);
     _input.dispose();
     super.dispose();
+  }
+
+  /// A link shared with "Open Tapnab for more options" lands in the link box.
+  void _onIncoming() {
+    final text = c.incoming.value;
+    if (text == null) return;
+    c.incoming.value = null;
+    _input.text = text;
   }
 
   @override
@@ -70,7 +89,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     FocusScope.of(context).unfocus();
     var text = _input.text;
     if (UrlUtils.extractUrls(text).isEmpty && _clipUrl != null) text = _clipUrl!;
-    final n = await c.addFromText(text);
+    final urls = UrlUtils.extractUrls(text);
+    if (urls.isEmpty) {
+      c.notice('No link found');
+      return;
+    }
+    final n = await downloadLinks(context, c, urls);
     if (n == 0 || !mounted) return;
     _input.clear();
     setState(() {
@@ -85,59 +109,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       ));
   }
 
-  Future<void> _onMenu(String value) async {
+  void _onMenu(String value) {
     switch (value) {
-      case 'update':
-        final messenger = ScaffoldMessenger.of(context);
-        messenger
-          ..hideCurrentSnackBar()
-          ..showSnackBar(const SnackBar(content: Text('Updating yt-dlp...')));
-        try {
-          await c.updateEngine();
-        } catch (e) {
-          messenger
-            ..hideCurrentSnackBar()
-            ..showSnackBar(SnackBar(content: Text('Update failed: $e')));
-        }
+      case 'settings':
+        widget.onOpenSettings();
       case 'how':
-        _showHowTo();
+        showHowTo(context);
       case 'about':
-        showAboutDialog(
-          context: context,
-          applicationName: 'Tapnab',
-          applicationVersion: '1.0.0',
-          applicationIcon: const LogoMark(size: 48),
-          children: const [
-            SizedBox(height: 12),
-            Text(
-              'Download only content you have the right to save: your own uploads, '
-              'Creative Commons or public-domain videos, or anything the owner permits.',
-            ),
-          ],
-        );
+        showAbout(context);
     }
-  }
-
-  void _showHowTo() {
-    showModalBottomSheet<void>(
-      context: context,
-      showDragHandle: true,
-      builder: (ctx) => Padding(
-        padding: const EdgeInsets.fromLTRB(24, 0, 24, 32),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('How to use Tapnab', style: Theme.of(ctx).textTheme.titleLarge),
-            const SizedBox(height: 16),
-            const _Step(n: 1, text: 'In YouTube tap Share, then choose Tapnab. Or paste links here.'),
-            const _Step(n: 2, text: 'Pick MP3 or MP4 and a quality from low to high.'),
-            const _Step(n: 3, text: 'Tap Download. Follow progress in the Downloads tab.'),
-            const _Step(n: 4, text: 'Tap a finished item to play it. Use the menu to share or delete.'),
-          ],
-        ),
-      ),
-    );
   }
 
   @override
@@ -251,12 +231,12 @@ class _Header extends StatelessWidget {
           onSelected: onMenu,
           itemBuilder: (_) => const [
             PopupMenuItem(
-              value: 'update',
+              value: 'settings',
               child: ListTile(
                 dense: true,
                 contentPadding: EdgeInsets.zero,
-                leading: Icon(Icons.system_update_alt_rounded),
-                title: Text('Update yt-dlp engine'),
+                leading: Icon(Icons.settings_rounded),
+                title: Text('Settings'),
               ),
             ),
             PopupMenuItem(
@@ -506,8 +486,8 @@ class _SettingsCard extends StatelessWidget {
           Divider(height: 1, indent: 16, endIndent: 16, color: cs.outlineVariant),
           SwitchListTile(
             secondary: Icon(Icons.queue_music_rounded, color: cs.primary),
-            title: const Text('Whole playlist'),
-            subtitle: const Text('Download every song in a playlist link'),
+            title: const Text('Pick from playlist'),
+            subtitle: const Text('Video links inside a playlist open the song picker'),
             value: c.playlist,
             onChanged: c.setPlaylist,
           ),
@@ -587,37 +567,10 @@ class _TipCard extends StatelessWidget {
           const SizedBox(width: 14),
           Expanded(
             child: Text(
-              'Tip: in YouTube tap Share, then Tapnab. The download starts with your saved choices.',
+              'Tip: in YouTube tap Share, then Tapnab. A small window opens right over YouTube.',
               style: TextStyle(color: cs.onSurfaceVariant),
             ),
           ),
-        ],
-      ),
-    );
-  }
-}
-
-class _Step extends StatelessWidget {
-  const _Step({required this.n, required this.text});
-
-  final int n;
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          CircleAvatar(
-            radius: 13,
-            backgroundColor: cs.primaryContainer,
-            child: Text('$n', style: TextStyle(fontSize: 13, color: cs.onPrimaryContainer, fontWeight: FontWeight.w700)),
-          ),
-          const SizedBox(width: 12),
-          Expanded(child: Text(text)),
         ],
       ),
     );

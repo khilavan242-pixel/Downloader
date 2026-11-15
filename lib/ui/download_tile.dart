@@ -11,10 +11,18 @@ import 'theme.dart';
 /// One download, shown the same way on Home (recent) and on the Downloads page.
 /// Completed items play on tap, like a browser's download manager.
 class DownloadTile extends StatelessWidget {
-  const DownloadTile({super.key, required this.task, required this.controller});
+  const DownloadTile({
+    super.key,
+    required this.task,
+    required this.controller,
+    this.selectable = false,
+  });
 
   final DownloadTask task;
   final DownloadController controller;
+
+  /// On the Downloads page: long-press starts selecting several items.
+  final bool selectable;
 
   @override
   Widget build(BuildContext context) {
@@ -24,22 +32,28 @@ class DownloadTile extends StatelessWidget {
     final c = controller;
     final missing = t.status == TaskStatus.completed && c.isMissing(t);
     final playable = t.status == TaskStatus.completed && !missing;
+    final selecting = selectable && c.selecting;
+    final selected = selectable && c.isSelected(t.id);
 
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
       decoration: BoxDecoration(
-        color: cs.surfaceContainerHigh,
+        color: selected
+            ? Color.alphaBlend(cs.primary.withValues(alpha: 0.16), cs.surfaceContainerHigh)
+            : cs.surfaceContainerHigh,
         borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: selected ? cs.primary : Colors.transparent, width: 1.5),
       ),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
-        onTap: playable ? () => c.play(t) : null,
+        onTap: selecting ? () => c.toggleSelect(t.id) : (playable ? () => c.play(t) : null),
+        onLongPress: selectable ? () => c.toggleSelect(t.id) : null,
         child: Padding(
           padding: const EdgeInsets.fromLTRB(12, 12, 6, 12),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _Leading(task: t, missing: missing),
+              _Leading(task: t, missing: missing, selected: selected),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
@@ -62,7 +76,16 @@ class DownloadTile extends StatelessWidget {
                   ],
                 ),
               ),
-              _Actions(task: t, controller: c, playable: playable, missing: missing),
+              if (selecting)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(8, 12, 12, 0),
+                  child: Icon(
+                    selected ? Icons.check_circle_rounded : Icons.radio_button_unchecked_rounded,
+                    color: selected ? cs.primary : cs.outline,
+                  ),
+                )
+              else
+                _Actions(task: t, controller: c, playable: playable, missing: missing),
             ],
           ),
         ),
@@ -84,7 +107,7 @@ class DownloadTile extends StatelessWidget {
     final small = Theme.of(context).textTheme.bodySmall;
     switch (t.status) {
       case TaskStatus.queued:
-        return [_line('Waiting in queue', small?.copyWith(color: cs.onSurfaceVariant))];
+        return [_line(t.note ?? 'Waiting in queue', small?.copyWith(color: t.note != null ? cs.tertiary : cs.onSurfaceVariant))];
       case TaskStatus.fetching:
         return [
           const SizedBox(height: 8),
@@ -130,16 +153,26 @@ class DownloadTile extends StatelessWidget {
 }
 
 class _Leading extends StatelessWidget {
-  const _Leading({required this.task, required this.missing});
+  const _Leading({required this.task, required this.missing, required this.selected});
 
   final DownloadTask task;
   final bool missing;
+  final bool selected;
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final isAudio = task.kind == MediaKind.mp3;
     final accent = isAudio ? Brand.violet : Brand.coral;
+
+    if (selected) {
+      return Container(
+        width: 52,
+        height: 52,
+        decoration: BoxDecoration(color: cs.primary, borderRadius: BorderRadius.circular(16)),
+        child: Icon(Icons.check_rounded, color: cs.onPrimary, size: 28),
+      );
+    }
 
     Widget? badge;
     if (task.status == TaskStatus.completed) {

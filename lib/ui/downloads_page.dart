@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/download_task.dart';
+import '../models/quality.dart';
 import '../state/download_controller.dart';
 import '../utils/format_utils.dart';
 import 'download_tile.dart';
@@ -35,6 +36,9 @@ class _DownloadsPageState extends State<DownloadsPage> {
         .toList();
   }
 
+  /// Search, then the MP3/MP4 filter and the chosen order.
+  List<DownloadTask> _view(List<DownloadTask> list) => c.arrange(_filter(list));
+
   void _closeSearch() => setState(() {
         _searching = false;
         _search.clear();
@@ -54,6 +58,187 @@ class _DownloadsPageState extends State<DownloadsPage> {
     }
   }
 
+  Future<void> _confirmDelete() async {
+    final n = c.selectedTasks.where((t) => t.status == TaskStatus.completed).length;
+    if (n == 0) {
+      c.notice('Select finished downloads to delete');
+      return;
+    }
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Delete $n ${n == 1 ? 'file' : 'files'}?'),
+        content: const Text('They will be permanently deleted from your device.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Theme.of(ctx).colorScheme.error),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (ok == true) await c.deleteSelected();
+  }
+
+  Widget _normalBar(TextTheme text) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 12, 8, 4),
+      child: Row(
+        children: [
+          if (_searching)
+            Expanded(
+              child: TextField(
+                controller: _search,
+                autofocus: true,
+                onChanged: (_) => setState(() {}),
+                decoration: InputDecoration(
+                  hintText: 'Search downloads',
+                  prefixIcon: const Icon(Icons.search_rounded),
+                  filled: true,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(28),
+                    borderSide: BorderSide.none,
+                  ),
+                  contentPadding: const EdgeInsets.symmetric(vertical: 0),
+                ),
+              ),
+            )
+          else
+            Expanded(
+              child: Text('Downloads', style: text.headlineSmall?.copyWith(fontWeight: FontWeight.w800)),
+            ),
+          if (_searching)
+            IconButton(
+              tooltip: 'Close search',
+              icon: const Icon(Icons.close_rounded),
+              onPressed: _closeSearch,
+            )
+          else ...[
+            IconButton(
+              tooltip: 'Search',
+              icon: const Icon(Icons.search_rounded),
+              onPressed: () => setState(() => _searching = true),
+            ),
+            PopupMenuButton<SortMode>(
+              tooltip: 'Sort',
+              icon: const Icon(Icons.sort_rounded),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              initialValue: c.sort,
+              onSelected: c.setSort,
+              itemBuilder: (_) => [
+                for (final m in SortMode.values) PopupMenuItem(value: m, child: Text(m.label)),
+              ],
+            ),
+            PopupMenuButton<String>(
+              tooltip: 'More',
+              icon: const Icon(Icons.more_vert_rounded),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              onSelected: _onMenu,
+              itemBuilder: (_) => const [
+                PopupMenuItem(value: 'done', child: Text('Clear completed list')),
+                PopupMenuItem(value: 'failed', child: Text('Clear failed list')),
+                PopupMenuItem(value: 'all', child: Text('Clear all finished')),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _selectionBar(TextTheme text) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      decoration: BoxDecoration(
+        color: cs.primaryContainer,
+        borderRadius: BorderRadius.circular(24),
+      ),
+      child: Row(
+        children: [
+          IconButton(
+            tooltip: 'Cancel selection',
+            icon: const Icon(Icons.close_rounded),
+            onPressed: c.clearSelection,
+          ),
+          Expanded(
+            child: Text(
+              '${c.selectedCount} selected',
+              style: text.titleMedium?.copyWith(fontWeight: FontWeight.w700, color: cs.onPrimaryContainer),
+            ),
+          ),
+          IconButton(
+            tooltip: 'Select all',
+            icon: const Icon(Icons.select_all_rounded),
+            onPressed: () => c.selectAll(_view([...c.active, ...c.finished])),
+          ),
+          IconButton(
+            tooltip: 'Play selected',
+            icon: const Icon(Icons.play_circle_rounded),
+            onPressed: c.playSelected,
+          ),
+          IconButton(
+            tooltip: 'Share selected',
+            icon: const Icon(Icons.share_rounded),
+            onPressed: c.shareSelected,
+          ),
+          IconButton(
+            tooltip: 'Delete from device',
+            icon: const Icon(Icons.delete_outline_rounded),
+            onPressed: _confirmDelete,
+          ),
+          PopupMenuButton<String>(
+            tooltip: 'More',
+            icon: const Icon(Icons.more_vert_rounded),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            onSelected: (v) {
+              switch (v) {
+                case 'remove':
+                  c.removeSelected();
+                case 'retry':
+                  c.retrySelected();
+                case 'cancel':
+                  c.cancelSelected();
+              }
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: 'remove', child: Text('Remove from list')),
+              PopupMenuItem(value: 'retry', child: Text('Retry failed')),
+              PopupMenuItem(value: 'cancel', child: Text('Cancel active')),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _kindChips() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+      child: Row(
+        children: [
+          ChoiceChip(
+            label: const Text('All types'),
+            selected: c.kindFilter == null,
+            onSelected: (_) => c.setKindFilter(null),
+          ),
+          const SizedBox(width: 8),
+          for (final k in MediaKind.values) ...[
+            ChoiceChip(
+              label: Text(k.label),
+              selected: c.kindFilter == k,
+              onSelected: (_) => c.setKindFilter(c.kindFilter == k ? null : k),
+            ),
+            const SizedBox(width: 8),
+          ],
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
@@ -61,67 +246,13 @@ class _DownloadsPageState extends State<DownloadsPage> {
       builder: (context, _) {
         final text = Theme.of(context).textTheme;
         final activeN = c.activeCount;
+        final byDay = c.sort == SortMode.newest || c.sort == SortMode.oldest;
         return DefaultTabController(
           length: 4,
           child: SafeArea(
             child: Column(
               children: [
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 12, 8, 4),
-                  child: Row(
-                    children: [
-                      if (_searching)
-                        Expanded(
-                          child: TextField(
-                            controller: _search,
-                            autofocus: true,
-                            onChanged: (_) => setState(() {}),
-                            decoration: InputDecoration(
-                              hintText: 'Search downloads',
-                              prefixIcon: const Icon(Icons.search_rounded),
-                              filled: true,
-                              border: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(28),
-                                borderSide: BorderSide.none,
-                              ),
-                              contentPadding: const EdgeInsets.symmetric(vertical: 0),
-                            ),
-                          ),
-                        )
-                      else
-                        Expanded(
-                          child: Text(
-                            'Downloads',
-                            style: text.headlineSmall?.copyWith(fontWeight: FontWeight.w800),
-                          ),
-                        ),
-                      if (_searching)
-                        IconButton(
-                          tooltip: 'Close search',
-                          icon: const Icon(Icons.close_rounded),
-                          onPressed: _closeSearch,
-                        )
-                      else ...[
-                        IconButton(
-                          tooltip: 'Search',
-                          icon: const Icon(Icons.search_rounded),
-                          onPressed: () => setState(() => _searching = true),
-                        ),
-                        PopupMenuButton<String>(
-                          tooltip: 'More',
-                          icon: const Icon(Icons.more_vert_rounded),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                          onSelected: _onMenu,
-                          itemBuilder: (_) => const [
-                            PopupMenuItem(value: 'done', child: Text('Clear completed list')),
-                            PopupMenuItem(value: 'failed', child: Text('Clear failed list')),
-                            PopupMenuItem(value: 'all', child: Text('Clear all finished')),
-                          ],
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
+                c.selecting ? _selectionBar(text) : _normalBar(text),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                   child: TabBar(
@@ -133,12 +264,13 @@ class _DownloadsPageState extends State<DownloadsPage> {
                     ],
                   ),
                 ),
+                _kindChips(),
                 Expanded(
                   child: TabBarView(
                     children: [
                       _TaskList(
                         controller: c,
-                        rows: _rowsAll(_filter(c.active), _filter(c.finished)),
+                        rows: _rowsAll(_filter(c.active), _view(c.finished), byDay),
                         empty: const _Empty(
                           icon: Icons.download_for_offline_outlined,
                           title: 'No downloads yet',
@@ -156,7 +288,7 @@ class _DownloadsPageState extends State<DownloadsPage> {
                       ),
                       _TaskList(
                         controller: c,
-                        rows: _byDay(_filter(c.completed)),
+                        rows: _grouped(_view(c.completed), byDay),
                         empty: const _Empty(
                           icon: Icons.library_music_outlined,
                           title: 'No completed downloads',
@@ -165,7 +297,7 @@ class _DownloadsPageState extends State<DownloadsPage> {
                       ),
                       _TaskList(
                         controller: c,
-                        rows: _byDay(_filter(c.failed)),
+                        rows: _grouped(_view(c.failed), byDay),
                         empty: const _Empty(
                           icon: Icons.check_circle_outline_rounded,
                           title: 'No failed downloads',
@@ -183,12 +315,15 @@ class _DownloadsPageState extends State<DownloadsPage> {
     );
   }
 
-  /// Active items under "In progress", then finished items grouped by day.
-  static List<Object> _rowsAll(List<DownloadTask> active, List<DownloadTask> finished) => [
+  /// Active items under "In progress", then finished items.
+  static List<Object> _rowsAll(List<DownloadTask> active, List<DownloadTask> finished, bool byDay) => [
         if (active.isNotEmpty) 'In progress',
         ...active,
-        ..._byDay(finished),
+        ..._grouped(finished, byDay),
       ];
+
+  static List<Object> _grouped(List<DownloadTask> tasks, bool byDay) =>
+      byDay ? _byDay(tasks) : List<Object>.of(tasks);
 
   /// Inserts a day header (String) before the first item of each day.
   static List<Object> _byDay(List<DownloadTask> tasks) {
@@ -223,7 +358,7 @@ class _TaskList extends StatelessWidget {
       itemBuilder: (context, i) {
         final row = rows[i];
         if (row is DownloadTask) {
-          return DownloadTile(key: ValueKey(row.id), task: row, controller: controller);
+          return DownloadTile(key: ValueKey(row.id), task: row, controller: controller, selectable: true);
         }
         return Padding(
           padding: const EdgeInsets.fromLTRB(4, 14, 4, 8),

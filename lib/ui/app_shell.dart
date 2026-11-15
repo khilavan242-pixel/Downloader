@@ -1,12 +1,15 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../state/download_controller.dart';
+import 'browse_page.dart';
 import 'downloads_page.dart';
 import 'home_page.dart';
+import 'settings_page.dart';
 
-/// Bottom navigation: Home and Downloads.
+/// Bottom navigation: Home, Browse, Downloads, Settings.
 class AppShell extends StatefulWidget {
   const AppShell({super.key, required this.controller});
 
@@ -17,8 +20,11 @@ class AppShell extends StatefulWidget {
 }
 
 class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
+  static const _home = 0, _browse = 1, _downloads = 2, _settings = 3;
+
   int _index = 0;
   StreamSubscription<String>? _msgSub;
+  final _browseKey = GlobalKey<BrowsePageState>();
 
   DownloadController get c => widget.controller;
 
@@ -26,6 +32,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    c.incoming.addListener(_onIncoming);
     _msgSub = c.messages.listen((m) {
       if (!mounted) return;
       ScaffoldMessenger.of(context)
@@ -37,8 +44,14 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    c.incoming.removeListener(_onIncoming);
     _msgSub?.cancel();
     super.dispose();
+  }
+
+  /// A link arrived from "Open Tapnab for more options": show the Home page.
+  void _onIncoming() {
+    if (c.incoming.value != null && _index != _home) setState(() => _index = _home);
   }
 
   @override
@@ -52,43 +65,79 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
   void _go(int i) => setState(() => _index = i);
 
+  /// Back button: leave selection, go back in the browser, return to Home, then exit.
+  Future<void> _onBack() async {
+    if (c.selecting) {
+      c.clearSelection();
+      return;
+    }
+    if (_index == _browse && await (_browseKey.currentState?.goBack() ?? Future.value(false))) return;
+    if (_index != _home) {
+      _go(_home);
+      return;
+    }
+    await SystemNavigator.pop();
+  }
+
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
       listenable: c,
       builder: (context, _) {
         final active = c.activeCount;
-        return Scaffold(
-          body: IndexedStack(
-            index: _index,
-            children: [
-              HomePage(controller: c, onOpenDownloads: () => _go(1)),
-              DownloadsPage(controller: c),
-            ],
-          ),
-          bottomNavigationBar: NavigationBar(
-            selectedIndex: _index,
-            onDestinationSelected: _go,
-            destinations: [
-              const NavigationDestination(
-                icon: Icon(Icons.home_outlined),
-                selectedIcon: Icon(Icons.home_rounded),
-                label: 'Home',
-              ),
-              NavigationDestination(
-                icon: Badge(
-                  isLabelVisible: active > 0,
-                  label: Text('$active'),
-                  child: const Icon(Icons.download_outlined),
+        return PopScope(
+          canPop: false,
+          onPopInvokedWithResult: (didPop, _) {
+            if (!didPop) unawaited(_onBack());
+          },
+          child: Scaffold(
+            body: IndexedStack(
+              index: _index,
+              children: [
+                HomePage(
+                  controller: c,
+                  onOpenDownloads: () => _go(_downloads),
+                  onOpenSettings: () => _go(_settings),
                 ),
-                selectedIcon: Badge(
-                  isLabelVisible: active > 0,
-                  label: Text('$active'),
-                  child: const Icon(Icons.download_rounded),
+                BrowsePage(key: _browseKey, controller: c, active: _index == _browse),
+                DownloadsPage(controller: c),
+                SettingsPage(controller: c),
+              ],
+            ),
+            bottomNavigationBar: NavigationBar(
+              selectedIndex: _index,
+              onDestinationSelected: _go,
+              destinations: [
+                const NavigationDestination(
+                  icon: Icon(Icons.home_outlined),
+                  selectedIcon: Icon(Icons.home_rounded),
+                  label: 'Home',
                 ),
-                label: 'Downloads',
-              ),
-            ],
+                const NavigationDestination(
+                  icon: Icon(Icons.travel_explore_outlined),
+                  selectedIcon: Icon(Icons.travel_explore_rounded),
+                  label: 'Browse',
+                ),
+                NavigationDestination(
+                  icon: Badge(
+                    isLabelVisible: active > 0,
+                    label: Text('$active'),
+                    child: const Icon(Icons.download_outlined),
+                  ),
+                  selectedIcon: Badge(
+                    isLabelVisible: active > 0,
+                    label: Text('$active'),
+                    child: const Icon(Icons.download_rounded),
+                  ),
+                  label: 'Downloads',
+                ),
+                const NavigationDestination(
+                  icon: Icon(Icons.settings_outlined),
+                  selectedIcon: Icon(Icons.settings_rounded),
+                  label: 'Settings',
+                ),
+              ],
+            ),
           ),
         );
       },

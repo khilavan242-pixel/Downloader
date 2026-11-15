@@ -1,7 +1,9 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
+import '../models/cast.dart';
 import '../models/download_task.dart';
 import '../models/playlist_entry.dart';
 import '../models/quality.dart';
@@ -53,6 +55,7 @@ class DownloadController extends ChangeNotifier {
   final Set<String> _missing = {};
   final Set<String> _selected = {};
   int _idCounter = 0;
+  CastState _cast = const CastState.idle();
   SortMode _sort = SortMode.newest;
   MediaKind? _kindFilter;
 
@@ -71,6 +74,7 @@ class DownloadController extends ChangeNotifier {
   List<SaveFolder> get folders => _folders;
   List<QualityOption> get qualityOptions => QualityOption.forKind(_kind);
   SettingsStore get settings => _settings;
+  CastState get cast => _cast;
   ThemeMode get themeMode => _settings.themeMode;
 
   // ---- sort and filter -----------------------------------------------------------
@@ -452,6 +456,82 @@ class DownloadController extends ChangeNotifier {
     }
   }
 
+  // ---- casting to a TV --------------------------------------------------------------
+
+  Future<List<CastDevice>> discoverDevices() => _bridge.castDiscover();
+
+  /// Plays finished downloads on the TV, oldest first, one after another.
+  Future<void> castTasks(CastDevice device, List<DownloadTask> tasks) async {
+    final items = tasks
+        .where((t) => t.status == TaskStatus.completed && t.fileUri != null && !_missing.contains(t.id))
+        .toList()
+      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    if (items.isEmpty) {
+      _say('Select finished downloads to play on the TV');
+      return;
+    }
+    await _startCast(
+      device,
+      [for (final t in items) CastItem(uri: t.fileUri!, title: t.displayTitle, mime: t.mime)],
+    );
+  }
+
+  /// Plays YouTube links on the TV straight from YouTube (nothing is downloaded).
+  /// A playlist page is expanded into all of its videos.
+  Future<void> castLinks(CastDevice device, List<String> urls, {bool audioOnly = false}) async {
+    final mime = audioOnly ? 'audio/mp4' : 'video/mp4';
+    _cast = CastState(status: 'connecting', device: device.name);
+    notifyListeners();
+    final items = <CastItem>[];
+    try {
+      for (final url in urls) {
+        if (UrlUtils.isPlaylistPage(url)) {
+          final entries = await _bridge.fetchPlaylist(url);
+          for (final e in entries) {
+            items.add(CastItem(uri: e.url, title: e.displayTitle, mime: mime, stream: true));
+          }
+        } else {
+          items.add(CastItem(uri: url, title: 'YouTube video', mime: mime, stream: true));
+        }
+      }
+    } catch (_) {
+      _cast = const CastState.idle();
+      notifyListeners();
+      _say('Could not read the playlist');
+      return;
+    }
+    await _startCast(device, items);
+  }
+
+  Future<void> _startCast(CastDevice device, List<CastItem> items) async {
+    if (items.isEmpty) {
+      _cast = const CastState.idle();
+      notifyListeners();
+      _say('Nothing to play');
+      return;
+    }
+    _cast = CastState(status: 'connecting', device: device.name, count: items.length, title: items.first.title);
+    notifyListeners();
+    try {
+      await _bridge.castPlay(device, items);
+    } on PlatformException catch (e) {
+      _cast = const CastState.idle();
+      notifyListeners();
+      _say(e.message ?? 'Could not reach the TV');
+    } catch (_) {
+      _cast = const CastState.idle();
+      notifyListeners();
+      _say('Could not reach the TV');
+    }
+  }
+
+  /// `pause`, `resume`, `next`, `previous` or `stop`.
+  Future<void> castControl(String action) async {
+    try {
+      await _bridge.castControl(action);
+    } catch (_) {/* the TV state event will tell the story */}
+  }
+
   /// A download of the same video and format that is finished (and still on the
   /// device) or still running, or null. Used to warn before downloading twice.
   DownloadTask? existingFor(String url, {MediaKind? kind}) {
@@ -590,6 +670,9 @@ class DownloadController extends ChangeNotifier {
 
   Future<void> onAppResumed() async {
     await _syncNative();
+    try {
+      _cast = await _bridge.castState();
+    } catch (_) {}
     _persistSoon();
     notifyListeners();
     await _takeSharedText();
@@ -642,6 +725,12 @@ class DownloadController extends ChangeNotifier {
       _forget(e['id'] as String);
       _say('${e['count']} songs added to the queue');
       _persistSoon();
+      notifyListeners();
+      return;
+    }
+    if (e['type'] == 'cast') {
+      _cast = CastState.fromMap(e);
+      if (_cast.status == 'error' && _cast.error != null) _say(_cast.error!);
       notifyListeners();
       return;
     }

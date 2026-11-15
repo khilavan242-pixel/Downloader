@@ -14,6 +14,7 @@ void main() {
         savedTo: 'Movies/Tapnab',
         fileUri: 'content://media/external/video/media/7',
         fileSize: 3555328,
+        subfolder: 'Road Trip',
         createdAt: DateTime.fromMillisecondsSinceEpoch(1000000),
         finishedAt: DateTime.fromMillisecondsSinceEpoch(2000000),
       );
@@ -26,6 +27,7 @@ void main() {
     expect(back.status, TaskStatus.completed);
     expect(back.fileUri, 'content://media/external/video/media/7');
     expect(back.fileSize, 3555328);
+    expect(back.subfolder, 'Road Trip');
     expect(back.createdAt.millisecondsSinceEpoch, 1000000);
     expect(back.finishedAt?.millisecondsSinceEpoch, 2000000);
     expect(back.when.millisecondsSinceEpoch, 2000000);
@@ -61,5 +63,22 @@ void main() {
       DownloadTask(id: 'b', url: 'u', kind: MediaKind.mp3, quality: QualityOption.audio[0]).mime,
       'audio/mpeg',
     );
+  });
+
+  test('fromMap reads native timestamps, folder and note', () {
+    final t = DownloadTask.fromMap({
+      'id': 'x',
+      'kind': 'mp3',
+      'quality': 128,
+      'status': 'queued',
+      'note': 'Waiting for Wi-Fi',
+      'subfolder': 'Mix',
+      'createdAt': 5000,
+      'finishedAt': 9000,
+    });
+    expect(t.note, 'Waiting for Wi-Fi');
+    expect(t.subfolder, 'Mix');
+    expect(t.createdAt.millisecondsSinceEpoch, 5000);
+    expect(t.finishedAt?.millisecondsSinceEpoch, 9000);
   });
 }

@@ -46,4 +46,35 @@ void main() {
       }
     });
   });
+
+  group('videoId', () {
+    test('reads the id from every common link shape', () {
+      expect(UrlUtils.videoId('https://www.youtube.com/watch?v=dQw4w9WgXcQ'), 'dQw4w9WgXcQ');
+      expect(UrlUtils.videoId('https://youtu.be/dQw4w9WgXcQ?si=abc'), 'dQw4w9WgXcQ');
+      expect(UrlUtils.videoId('https://m.youtube.com/shorts/dQw4w9WgXcQ'), 'dQw4w9WgXcQ');
+      expect(UrlUtils.videoId('https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLx'), 'dQw4w9WgXcQ');
+    });
+
+    test('is null for playlists, other sites and junk', () {
+      expect(UrlUtils.videoId('https://www.youtube.com/playlist?list=PLx'), isNull);
+      expect(UrlUtils.videoId('https://example.com/watch?v=dQw4w9WgXcQ'), isNull);
+      expect(UrlUtils.videoId('https://www.youtube.com/watch?v=short'), isNull);
+      expect(UrlUtils.videoId('not a url'), isNull);
+    });
+  });
+
+  group('page kinds', () {
+    test('playlist pages versus videos inside a playlist', () {
+      expect(UrlUtils.isPlaylistPage('https://youtube.com/playlist?list=RDCLAK5uy'), isTrue);
+      expect(UrlUtils.isPlaylistPage('https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLx'), isFalse);
+      expect(UrlUtils.isPlaylistPage('https://www.youtube.com/watch?v=dQw4w9WgXcQ'), isFalse);
+    });
+
+    test('downloadable pages for the Browse button', () {
+      expect(UrlUtils.isDownloadablePage('https://m.youtube.com/watch?v=dQw4w9WgXcQ'), isTrue);
+      expect(UrlUtils.isDownloadablePage('https://m.youtube.com/playlist?list=PLx'), isTrue);
+      expect(UrlUtils.isDownloadablePage('https://m.youtube.com/'), isFalse);
+      expect(UrlUtils.isDownloadablePage('https://example.com/watch?v=dQw4w9WgXcQ'), isFalse);
+    });
+  });
 }

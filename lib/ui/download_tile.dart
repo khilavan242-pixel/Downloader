@@ -6,6 +6,7 @@ import '../models/quality.dart';
 import '../state/download_controller.dart';
 import '../utils/format_utils.dart';
 import '../utils/url_utils.dart';
+import 'cast_sheet.dart';
 import 'theme.dart';
 
 /// One download, shown the same way on Home (recent) and on the Downloads page.
@@ -282,6 +283,7 @@ class _Actions extends StatelessWidget {
           itemBuilder: (_) => [
             if (t.status == TaskStatus.completed && !missing) ...[
               _item('play', Icons.play_arrow_rounded, 'Play'),
+              _item('tv', Icons.tv_rounded, 'Play on TV'),
               _item('share', Icons.share_rounded, 'Share'),
             ],
             if (t.status != TaskStatus.completed) _item('retry', Icons.refresh_rounded, 'Retry'),
@@ -318,6 +320,8 @@ class _Actions extends StatelessWidget {
     switch (value) {
       case 'play':
         await c.play(t);
+      case 'tv':
+        await castDownloads(context, c, [t]);
       case 'share':
         await c.share(t);
       case 'retry':

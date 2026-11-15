@@ -4,6 +4,7 @@ import '../models/download_task.dart';
 import '../models/quality.dart';
 import '../state/download_controller.dart';
 import '../utils/format_utils.dart';
+import 'cast_sheet.dart';
 import 'download_tile.dart';
 
 /// Download manager: All / Active / Done / Failed, grouped by day.
@@ -171,14 +172,14 @@ class _DownloadsPageState extends State<DownloadsPage> {
             ),
           ),
           IconButton(
-            tooltip: 'Select all',
-            icon: const Icon(Icons.select_all_rounded),
-            onPressed: () => c.selectAll(_view([...c.active, ...c.finished])),
-          ),
-          IconButton(
             tooltip: 'Play selected',
             icon: const Icon(Icons.play_circle_rounded),
             onPressed: c.playSelected,
+          ),
+          IconButton(
+            tooltip: 'Play on TV',
+            icon: const Icon(Icons.tv_rounded),
+            onPressed: () => castDownloads(context, c, c.selectedTasks),
           ),
           IconButton(
             tooltip: 'Share selected',
@@ -196,6 +197,8 @@ class _DownloadsPageState extends State<DownloadsPage> {
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
             onSelected: (v) {
               switch (v) {
+                case 'all':
+                  c.selectAll(_view([...c.active, ...c.finished]));
                 case 'remove':
                   c.removeSelected();
                 case 'retry':
@@ -205,6 +208,7 @@ class _DownloadsPageState extends State<DownloadsPage> {
               }
             },
             itemBuilder: (_) => const [
+              PopupMenuItem(value: 'all', child: Text('Select all')),
               PopupMenuItem(value: 'remove', child: Text('Remove from list')),
               PopupMenuItem(value: 'retry', child: Text('Retry failed')),
               PopupMenuItem(value: 'cancel', child: Text('Cancel active')),

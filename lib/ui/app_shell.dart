@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import '../state/download_controller.dart';
 import 'browse_page.dart';
+import 'cast_bar.dart';
 import 'downloads_page.dart';
 import 'home_page.dart';
 import 'settings_page.dart';
@@ -99,12 +100,26 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                   onOpenDownloads: () => _go(_downloads),
                   onOpenSettings: () => _go(_settings),
                 ),
-                BrowsePage(key: _browseKey, controller: c, active: _index == _browse),
+                BrowsePage(key: _browseKey, controller: c, active: _index == _browse, onNavigate: _go),
                 DownloadsPage(controller: c),
                 SettingsPage(controller: c),
               ],
             ),
-            bottomNavigationBar: NavigationBar(
+            // Browse is full screen, like the YouTube app: no Tapnab bar in the way.
+            bottomNavigationBar: _index == _browse
+                ? null
+                : Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [CastBar(controller: c), _navBar(active)],
+                  ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _navBar(int active) {
+    return NavigationBar(
               selectedIndex: _index,
               onDestinationSelected: _go,
               destinations: [
@@ -137,10 +152,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                   label: 'Settings',
                 ),
               ],
-            ),
-          ),
-        );
-      },
-    );
+            );
   }
 }

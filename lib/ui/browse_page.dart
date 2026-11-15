@@ -3,6 +3,8 @@ import 'package:webview_flutter/webview_flutter.dart';
 
 import '../state/download_controller.dart';
 import '../utils/url_utils.dart';
+import 'cast_bar.dart';
+import 'cast_sheet.dart';
 import 'download_sheet.dart';
 import 'theme.dart';
 
@@ -12,10 +14,18 @@ import 'theme.dart';
 /// The web view is created the first time the tab is shown ([active]), so it
 /// costs nothing until it is used.
 class BrowsePage extends StatefulWidget {
-  const BrowsePage({super.key, required this.controller, required this.active});
+  const BrowsePage({
+    super.key,
+    required this.controller,
+    required this.active,
+    required this.onNavigate,
+  });
 
   final DownloadController controller;
   final bool active;
+
+  /// Switches the app to another tab: 0 Home, 2 Downloads, 3 Settings.
+  final void Function(int tab) onNavigate;
 
   @override
   State<BrowsePage> createState() => BrowsePageState();
@@ -86,101 +96,136 @@ class BrowsePageState extends State<BrowsePage> {
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
     final w = _web;
     if (w == null) {
       return const SafeArea(child: Center(child: Text('Browse')));
     }
     final canDownload = UrlUtils.isDownloadablePage(_url);
     final loading = _progress < 100;
+
+    // Full screen, like the YouTube app: only the status bar is kept free, and
+    // a few small floating buttons sit above YouTube's own bottom bar.
     return SafeArea(
-      child: Column(
+      child: Stack(
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(4, 4, 4, 0),
-            child: Row(
-              children: [
-                IconButton(
-                  tooltip: 'Back',
-                  icon: const Icon(Icons.arrow_back_rounded),
-                  onPressed: goBack,
-                ),
-                IconButton(
-                  tooltip: 'YouTube home',
-                  icon: const Icon(Icons.home_rounded),
-                  onPressed: () => w.loadRequest(Uri.parse(_home)),
-                ),
-                Expanded(
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
-                    decoration: BoxDecoration(
-                      color: cs.surfaceContainerHigh,
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: Text(
-                      _url.replaceFirst(RegExp(r'^https?://'), ''),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.bodySmall,
-                    ),
-                  ),
-                ),
-                IconButton(
-                  tooltip: 'Reload',
-                  icon: const Icon(Icons.refresh_rounded),
-                  onPressed: w.reload,
-                ),
-              ],
+          Positioned.fill(child: WebViewWidget(controller: w)),
+          if (loading)
+            Positioned(
+              left: 0,
+              right: 0,
+              top: 0,
+              child: LinearProgressIndicator(value: _progress / 100, minHeight: 3),
+            ),
+          ListenableBuilder(
+            listenable: c,
+            builder: (context, _) => Positioned(
+              left: 0,
+              right: 0,
+              top: 4,
+              child: CastBar(controller: c),
             ),
           ),
-          SizedBox(
-            height: 3,
-            child: loading ? LinearProgressIndicator(value: _progress / 100) : null,
-          ),
-          Expanded(
-            child: Stack(
-              children: [
-                WebViewWidget(controller: w),
-                if (canDownload)
-                  Positioned(
-                    right: 16,
-                    bottom: 16,
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        gradient: Brand.gradient,
-                        borderRadius: BorderRadius.circular(28),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Brand.violet.withValues(alpha: 0.4),
-                            blurRadius: 16,
-                            offset: const Offset(0, 6),
-                          ),
-                        ],
+          Positioned(left: 12, bottom: 84, child: _menuButton(context, w)),
+          Positioned(
+            right: 12,
+            bottom: 84,
+            child: canDownload
+                ? Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      _roundButton(
+                        icon: Icons.tv_rounded,
+                        tooltip: 'Play on TV',
+                        onTap: () => castYoutube(context, c, [_url]),
                       ),
-                      child: InkWell(
-                        borderRadius: BorderRadius.circular(28),
-                        onTap: () => showDownloadSheet(context, c, _url),
-                        child: const Padding(
-                          padding: EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(Icons.download_rounded, color: Colors.white),
-                              SizedBox(width: 8),
-                              Text(
-                                'Download',
-                                style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 15),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-              ],
-            ),
+                      const SizedBox(height: 10),
+                      _downloadPill(context),
+                    ],
+                  )
+                : const SizedBox.shrink(),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _roundButton({required IconData icon, required String tooltip, required VoidCallback onTap}) {
+    return Material(
+      color: Colors.black.withValues(alpha: 0.6),
+      shape: const CircleBorder(),
+      child: IconButton(
+        tooltip: tooltip,
+        icon: Icon(icon, color: Colors.white),
+        onPressed: onTap,
+      ),
+    );
+  }
+
+  Widget _menuButton(BuildContext context, WebViewController w) {
+    return Material(
+      color: Colors.black.withValues(alpha: 0.6),
+      shape: const CircleBorder(),
+      child: PopupMenuButton<String>(
+        tooltip: 'Tapnab menu',
+        icon: const Icon(Icons.apps_rounded, color: Colors.white),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        onSelected: (v) {
+          switch (v) {
+            case 'home':
+              widget.onNavigate(0);
+            case 'downloads':
+              widget.onNavigate(2);
+            case 'settings':
+              widget.onNavigate(3);
+            case 'yt':
+              w.loadRequest(Uri.parse(_home));
+            case 'reload':
+              w.reload();
+          }
+        },
+        itemBuilder: (_) => const [
+          PopupMenuItem(value: 'home', child: Text('Tapnab home')),
+          PopupMenuItem(value: 'downloads', child: Text('Downloads')),
+          PopupMenuItem(value: 'settings', child: Text('Settings')),
+          PopupMenuDivider(),
+          PopupMenuItem(value: 'yt', child: Text('YouTube home')),
+          PopupMenuItem(value: 'reload', child: Text('Reload page')),
+        ],
+      ),
+    );
+  }
+
+  Widget _downloadPill(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        gradient: Brand.gradient,
+        borderRadius: BorderRadius.circular(28),
+        boxShadow: [
+          BoxShadow(
+            color: Brand.violet.withValues(alpha: 0.4),
+            blurRadius: 16,
+            offset: const Offset(0, 6),
+          ),
+        ],
+      ),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(28),
+        onTap: () => showDownloadSheet(context, c, _url),
+        child: const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.download_rounded, color: Colors.white),
+              SizedBox(width: 8),
+              Text(
+                'Download',
+                style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 15),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

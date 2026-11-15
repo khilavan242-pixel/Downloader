@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models/quality.dart';
 import '../state/download_controller.dart';
+import 'cast_sheet.dart';
 import 'link_actions.dart';
 import 'theme.dart';
 
@@ -89,6 +90,17 @@ class _DownloadSheet extends StatelessWidget {
                       ),
                     ),
                   ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Center(
+                child: TextButton.icon(
+                  icon: const Icon(Icons.tv_rounded),
+                  label: const Text('Play on TV instead'),
+                  onPressed: () async {
+                    Navigator.of(context).pop();
+                    if (hostContext.mounted) await castYoutube(hostContext, c, [url]);
+                  },
                 ),
               ),
             ],

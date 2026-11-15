@@ -5,6 +5,7 @@ import '../models/quality.dart';
 import '../state/download_controller.dart';
 import '../utils/url_utils.dart';
 import 'download_tile.dart';
+import 'cast_sheet.dart';
 import 'folder_picker_sheet.dart';
 import 'info_dialogs.dart';
 import 'link_actions.dart';
@@ -109,6 +110,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       ));
   }
 
+  /// Plays the pasted YouTube link(s) on a TV / set-top box, with no download.
+  Future<void> _playOnTv() async {
+    FocusScope.of(context).unfocus();
+    var text = _input.text;
+    if (UrlUtils.extractUrls(text).isEmpty && _clipUrl != null) text = _clipUrl!;
+    final urls = UrlUtils.extractUrls(text);
+    if (urls.isEmpty) {
+      c.notice('Paste a YouTube link first');
+      return;
+    }
+    await castYoutube(context, c, urls);
+  }
+
   void _onMenu(String value) {
     switch (value) {
       case 'settings':
@@ -174,7 +188,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 label: 'Download ${c.kind.label} · ${c.quality.label}',
                 onTap: _download,
               ),
-              const SizedBox(height: 28),
+              const SizedBox(height: 8),
+              Center(
+                child: TextButton.icon(
+                  onPressed: _playOnTv,
+                  icon: const Icon(Icons.tv_rounded),
+                  label: const Text('Play on TV instead'),
+                ),
+              ),
+              const SizedBox(height: 20),
               Row(
                 children: [
                   Text(

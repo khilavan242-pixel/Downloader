@@ -45,6 +45,35 @@ class UrlUtils {
     return uri.queryParameters.containsKey('list') || uri.path.contains('/playlist');
   }
 
+  /// True for a playlist page itself (no single video chosen).
+  static bool isPlaylistPage(String url) {
+    final uri = Uri.tryParse(url);
+    if (uri == null || !hasPlaylist(url)) return false;
+    return uri.path.contains('/playlist') || videoId(url) == null;
+  }
+
+  /// The 11-character YouTube video id, or null (playlist pages, other sites).
+  static String? videoId(String url) {
+    final uri = Uri.tryParse(url);
+    if (uri == null || !isYoutube(url)) return null;
+    final host = uri.host.toLowerCase();
+    String? id;
+    if (host.endsWith('youtu.be')) {
+      id = uri.pathSegments.isEmpty ? null : uri.pathSegments.first;
+    } else if (uri.path == '/watch') {
+      id = uri.queryParameters['v'];
+    } else if (uri.pathSegments.length >= 2 &&
+        const {'shorts', 'embed', 'live', 'v'}.contains(uri.pathSegments.first)) {
+      id = uri.pathSegments[1];
+    }
+    if (id == null || !RegExp(r'^[A-Za-z0-9_-]{11}$').hasMatch(id)) return null;
+    return id;
+  }
+
+  /// True when a page address is something Tapnab can download (video or playlist).
+  static bool isDownloadablePage(String url) =>
+      isYoutube(url) && (videoId(url) != null || hasPlaylist(url));
+
   static String formatEta(int seconds) {
     if (seconds < 0) return '';
     final h = seconds ~/ 3600;

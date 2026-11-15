@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/services.dart';
 
+import '../models/cast.dart';
 import '../models/download_task.dart';
 import '../models/playlist_entry.dart';
 import '../models/quality.dart';
@@ -119,6 +120,28 @@ class NativeBridge {
   Future<bool> shareFiles(List<String> uris, String mime, String title) async =>
       (await _methods.invokeMethod<bool>('shareFiles', {'uris': uris, 'mime': mime, 'title': title})) ??
       false;
+
+  // ---- casting to a TV (DLNA) ------------------------------------------------------
+
+  /// Looks for TVs / set-top boxes on the Wi-Fi (takes a few seconds).
+  Future<List<CastDevice>> castDiscover() async {
+    final raw = await _methods.invokeListMethod<Map<dynamic, dynamic>>('castDiscover');
+    return (raw ?? const []).map(CastDevice.fromMap).toList();
+  }
+
+  /// Starts playing [items] one after another on [device].
+  Future<void> castPlay(CastDevice device, List<CastItem> items) => _methods.invokeMethod<bool>(
+        'castPlay',
+        {'device': device.toMap(), 'items': items.map((i) => i.toMap()).toList()},
+      );
+
+  /// `pause`, `resume`, `next`, `previous` or `stop`.
+  Future<void> castControl(String action) => _methods.invokeMethod<void>('castControl', {'action': action});
+
+  Future<CastState> castState() async {
+    final raw = await _methods.invokeMapMethod<dynamic, dynamic>('castState');
+    return raw == null ? const CastState.idle() : CastState.fromMap(raw);
+  }
 
   /// Deletes the saved file from the device.
   Future<bool> deleteFile(String uri) async =>

@@ -30,7 +30,17 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- "Share -> Tapnab" from YouTube and any other app that shares links as text -->
+        </activity>
+
+        <!-- The small "Share -> Tapnab" pop-up that opens over YouTube -->
+        <activity
+            android:name=".QuickShareActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:launchMode="singleTask"
+            android:label="Tapnab"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -55,4 +65,3 @@
         </intent>
     </queries>
 </manifest>
-

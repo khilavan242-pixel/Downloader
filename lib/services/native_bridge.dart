@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 
 import '../models/download_task.dart';
+import '../models/playlist_entry.dart';
 import '../models/quality.dart';
 import '../models/save_folder.dart';
 
@@ -10,7 +11,7 @@ import '../models/save_folder.dart';
 ///
 /// Contract with `DownloadChannel.kt`:
 ///  * MethodChannel `tapnab/downloader`
-///      enqueue({id,url,kind,quality,playlist,folderUri?})  -> void
+///      enqueue({id,url,kind,quality,playlist,folderUri?,subfolder?}) -> void
 ///      cancel({id})                                         -> void
 ///      snapshot()                                           -> List<Map> (all known tasks)
 ///      pickFolder()                                         -> Map? (null when cancelled)
@@ -43,6 +44,7 @@ class NativeBridge {
     required QualityOption quality,
     required bool playlist,
     SaveFolder? folder,
+    String? subfolder,
   }) {
     return _methods.invokeMethod<void>('enqueue', {
       'id': id,
@@ -51,6 +53,7 @@ class NativeBridge {
       'quality': quality.value,
       'playlist': playlist,
       'folderUri': folder?.uri,
+      'subfolder': subfolder,
     });
   }
 
@@ -81,6 +84,26 @@ class NativeBridge {
   Future<String> updateEngine() async =>
       (await _methods.invokeMethod<String>('updateEngine')) ?? 'unknown';
 
+  /// yt-dlp version and when the engine was last updated (epoch ms, 0 = never).
+  Future<({String version, int lastUpdate})> engineInfo() async {
+    final raw = await _methods.invokeMapMethod<dynamic, dynamic>('engineVersion');
+    return (
+      version: (raw?['version'] as String?) ?? 'unknown',
+      lastUpdate: (raw?['lastUpdate'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  /// Lists the songs of a playlist (or the single video) without downloading.
+  Future<List<PlaylistEntry>> fetchPlaylist(String url) async {
+    final raw = await _methods.invokeListMethod<Map<dynamic, dynamic>>('fetchPlaylist', {'url': url});
+    return (raw ?? const []).map(PlaylistEntry.fromMap).toList();
+  }
+
+  /// Opens the files in the installed music / video player.
+  Future<bool> playFiles(List<String> uris, String mime, String title) async =>
+      (await _methods.invokeMethod<bool>('playFiles', {'uris': uris, 'mime': mime, 'title': title})) ??
+      false;
+
   Future<String?> consumeSharedText() =>
       _methods.invokeMethod<String>('consumeSharedText');
 
@@ -90,6 +113,11 @@ class NativeBridge {
 
   Future<bool> shareFile(String uri, String mime, String title) async =>
       (await _methods.invokeMethod<bool>('shareFile', {'uri': uri, 'mime': mime, 'title': title})) ??
+      false;
+
+  /// Shares several files in one go.
+  Future<bool> shareFiles(List<String> uris, String mime, String title) async =>
+      (await _methods.invokeMethod<bool>('shareFiles', {'uris': uris, 'mime': mime, 'title': title})) ??
       false;
 
   /// Deletes the saved file from the device.

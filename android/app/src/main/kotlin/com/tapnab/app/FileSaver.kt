@@ -13,6 +13,9 @@ import java.io.File
  *  * a folder the user picked (any storage, including USB pendrives), or
  *  * MediaStore `Music/Tapnab` / `Movies/Tapnab`, so it shows up in music and
  *    gallery apps without any storage permission.
+ *
+ * With a [subfolder] (used for playlists) the file goes into a sub-directory
+ * of either location.
  */
 object FileSaver {
 
@@ -22,21 +25,41 @@ object FileSaver {
      */
     data class Saved(val label: String, val uri: Uri, val size: Long)
 
-    fun save(context: Context, source: File, isAudio: Boolean, folderUri: String?): Saved {
+    fun save(
+        context: Context,
+        source: File,
+        isAudio: Boolean,
+        folderUri: String?,
+        displayName: String = source.name,
+        subfolder: String? = null,
+    ): Saved {
         val mime = mimeFor(source)
         return if (folderUri != null) {
-            saveToTree(context, source, mime, Uri.parse(folderUri))
+            saveToTree(context, source, mime, Uri.parse(folderUri), displayName, subfolder)
         } else {
-            saveToMediaStore(context, source, mime, isAudio)
+            saveToMediaStore(context, source, mime, isAudio, displayName, subfolder)
         }
     }
 
-    private fun saveToTree(context: Context, source: File, mime: String, treeUri: Uri): Saved {
-        val dir = DocumentFile.fromTreeUri(context, treeUri)
-        if (dir == null || !dir.exists() || !dir.canWrite()) {
+    private fun saveToTree(
+        context: Context,
+        source: File,
+        mime: String,
+        treeUri: Uri,
+        displayName: String,
+        subfolder: String?,
+    ): Saved {
+        val root = DocumentFile.fromTreeUri(context, treeUri)
+        if (root == null || !root.exists() || !root.canWrite()) {
             throw IllegalStateException("The selected folder is no longer available. Pick it again.")
         }
-        val name = uniqueName(source.name) { dir.findFile(it) != null }
+        var dir: DocumentFile = root
+        if (!subfolder.isNullOrBlank()) {
+            dir = root.findFile(subfolder)?.takeIf { it.isDirectory }
+                ?: root.createDirectory(subfolder)
+                ?: throw IllegalStateException("Could not create the folder \"$subfolder\" in ${root.name}.")
+        }
+        val name = uniqueName(displayName) { dir.findFile(it) != null }
         val target = dir.createFile(mime, name)
             ?: throw IllegalStateException("Could not create a file in ${dir.name}. Is the drive full or read-only?")
         try {
@@ -47,19 +70,27 @@ object FileSaver {
             target.delete()
             throw e
         }
-        return Saved(dir.name ?: "selected folder", target.uri, source.length())
+        val label = if (subfolder.isNullOrBlank()) root.name ?: "selected folder" else "${root.name ?: "folder"}/$subfolder"
+        return Saved(label, target.uri, source.length())
     }
 
-    private fun saveToMediaStore(context: Context, source: File, mime: String, isAudio: Boolean): Saved {
+    private fun saveToMediaStore(
+        context: Context,
+        source: File,
+        mime: String,
+        isAudio: Boolean,
+        displayName: String,
+        subfolder: String?,
+    ): Saved {
         val collection = if (isAudio) {
             MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
         } else {
             MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
         }
         val root = if (isAudio) Environment.DIRECTORY_MUSIC else Environment.DIRECTORY_MOVIES
-        val relative = "$root/Tapnab"
+        val relative = if (subfolder.isNullOrBlank()) "$root/Tapnab" else "$root/Tapnab/$subfolder"
         val values = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, source.name)
+            put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
             put(MediaStore.MediaColumns.MIME_TYPE, mime)
             put(MediaStore.MediaColumns.RELATIVE_PATH, relative)
             put(MediaStore.MediaColumns.IS_PENDING, 1)

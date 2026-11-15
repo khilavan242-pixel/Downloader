@@ -26,6 +26,7 @@ object YtdlpOptions {
         quality: Int,
         playlist: Boolean,
         workDir: File,
+        coverArt: Boolean = false,
     ): YoutubeDLRequest {
         val r = YoutubeDLRequest(url)
         // File names that are legal on FAT32/exFAT pendrives and Windows.
@@ -44,6 +45,11 @@ object YtdlpOptions {
             r.addOption("-x")
             r.addOption("--audio-format", "mp3")
             r.addOption("--audio-quality", "${if (quality > 0) quality else 320}K")
+            if (coverArt) {
+                // Album art from the video thumbnail, written into the MP3 tags.
+                r.addOption("--embed-thumbnail")
+                r.addOption("--convert-thumbnails", "jpg")
+            }
         } else {
             r.addOption("-f", videoFormat(quality))
             r.addOption("--merge-output-format", "mp4")
@@ -58,7 +64,7 @@ object YtdlpOptions {
         val lower = msg.lowercase()
         return when {
             "javascript runtime" in lower || "sign in to confirm" in lower || "http error 403" in lower ->
-                "YouTube blocked this request. Open the menu, choose \"Update yt-dlp engine\", then retry."
+                "YouTube blocked this request. Open Settings, tap \"Update now\", then retry."
             "private video" in lower -> "This video is private."
             "video unavailable" in lower || "has been removed" in lower -> "This video is unavailable."
             "age" in lower && "confirm" in lower -> "This video is age-restricted and needs a signed-in account."

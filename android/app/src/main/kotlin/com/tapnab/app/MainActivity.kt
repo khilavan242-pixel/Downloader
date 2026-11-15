@@ -91,6 +91,7 @@ class MainActivity : FlutterActivity() {
                         quality = call.argument<Int>("quality") ?: 0,
                         playlist = call.argument<Boolean>("playlist") ?: false,
                         folderUri = call.argument<String>("folderUri"),
+                        subfolder = call.argument<String>("subfolder")?.takeIf { it.isNotBlank() }?.let(NameCleaner::folderName),
                     ),
                 )
                 result.success(null)
@@ -130,6 +131,7 @@ class MainActivity : FlutterActivity() {
                 try {
                     TapnabApp.awaitReady()
                     YoutubeDL.getInstance().updateYoutubeDL(applicationContext, YoutubeDL.UpdateChannel.STABLE)
+                    TapnabApp.markUpdated(applicationContext)
                     val version = YoutubeDL.getInstance().version(applicationContext) ?: "unknown"
                     main.post { result.success(version) }
                 } catch (e: Throwable) {
@@ -177,6 +179,28 @@ class MainActivity : FlutterActivity() {
                 }
             }
 
+            "shareFiles" -> {
+                val uris = ArrayList<Uri>(call.argument<List<String>>("uris").orEmpty().map(Uri::parse))
+                if (uris.isEmpty()) {
+                    result.success(false)
+                    return
+                }
+                val send = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                    type = call.argument<String>("mime") ?: "*/*"
+                    putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+                    val clip = ClipData.newRawUri("", uris[0])
+                    for (i in 1 until uris.size) clip.addItem(ClipData.Item(uris[i]))
+                    clipData = clip
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                try {
+                    startActivity(Intent.createChooser(send, call.argument<String>("title") ?: "Share"))
+                    result.success(true)
+                } catch (e: Exception) {
+                    result.success(false)
+                }
+            }
+
             "deleteFile" -> {
                 val uri = call.argument<String>("uri")?.let(Uri::parse)
                 if (uri == null) {
@@ -208,6 +232,61 @@ class MainActivity : FlutterActivity() {
                         }
                     }
                     main.post { result.success(exists) }
+                }
+            }
+
+            "engineVersion" -> thread(name = "ytdlp-version") {
+                val info = try {
+                    TapnabApp.awaitReady()
+                    mapOf(
+                        "version" to (YoutubeDL.getInstance().version(applicationContext) ?: "unknown"),
+                        "lastUpdate" to TapnabApp.lastUpdate(applicationContext),
+                    )
+                } catch (e: Throwable) {
+                    mapOf("version" to "unavailable", "lastUpdate" to 0L)
+                }
+                main.post { result.success(info) }
+            }
+
+            "fetchPlaylist" -> {
+                val url = call.argument<String>("url")
+                if (url == null) {
+                    result.error("bad_args", "url is required", null)
+                    return
+                }
+                thread(name = "playlist-list") {
+                    try {
+                        val list = DownloadManager.listPlaylist(url).map {
+                            mapOf("url" to it.url, "title" to it.title, "duration" to it.duration, "playlist" to it.playlist)
+                        }
+                        main.post { result.success(list) }
+                    } catch (e: Throwable) {
+                        main.post { result.error("playlist_failed", YtdlpOptions.friendlyError(e.message), null) }
+                    }
+                }
+            }
+
+            "playFiles" -> {
+                val uris = ArrayList<Uri>(call.argument<List<String>>("uris").orEmpty().map(Uri::parse))
+                if (uris.isEmpty()) {
+                    result.success(false)
+                    return
+                }
+                // Players take the first item as the one to open; the rest ride along
+                // in ClipData for players that queue them all.
+                val view = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uris[0], call.argument<String>("mime") ?: "audio/*")
+                    val clip = ClipData.newRawUri("", uris[0])
+                    for (i in 1 until uris.size) clip.addItem(ClipData.Item(uris[i]))
+                    clipData = clip
+                    putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                try {
+                    startActivity(Intent.createChooser(view, call.argument<String>("title") ?: "Play with"))
+                    result.success(true)
+                } catch (e: Exception) {
+                    result.success(false)
                 }
             }
 

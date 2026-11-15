@@ -42,7 +42,7 @@ class FolderStore(private val context: Context) {
                 Uri.parse(uri),
                 Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
             )
-        } catch (_: Exception) {
+        } catch (e: Exception) {
             // Already released.
         }
         save(load().filterNot { it.uri == uri })
@@ -80,7 +80,7 @@ class FolderStore(private val context: Context) {
                 val o = arr.getJSONObject(it)
                 Folder(o.getString("uri"), o.getString("name"), o.optString("location"))
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
             emptyList()
         }
     }

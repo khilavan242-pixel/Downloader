@@ -75,8 +75,7 @@ class DownloadService : Service() {
         }
 
         private fun build(context: Context): Notification {
-            val snapshot = DownloadManager.snapshot()
-            val active = snapshot.filter { it["status"] in setOf("queued", "fetching", "downloading", "converting") }
+            val active = DownloadManager.activeSnapshot()
             val current = active.firstOrNull { it["status"] == "downloading" } ?: active.firstOrNull()
             val title = if (active.size > 1) "Downloading ${active.size} items" else "Downloading"
             val text = (current?.get("title") as? String) ?: (current?.get("url") as? String) ?: "Preparing..."

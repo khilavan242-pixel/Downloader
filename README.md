@@ -1,5 +1,3 @@
-# Downloader
-mp3 and mp4 download form youtube videos in one click 
 <p align="center">
   <img src="docs/logo.png" width="128" alt="Tapnab logo">
 </p>
@@ -10,18 +8,35 @@ A simple Android downloader that runs entirely on your phone. No account, no API
 
 ---
 
+## Screenshots
+
+<p align="center">
+  <img src="docs/screenshots/home-top.jpg" width="250" alt="Home">
+  &nbsp;
+  <img src="docs/screenshots/home-bottom.jpg" width="250" alt="Quality, folder and recent downloads">
+  &nbsp;
+  <img src="docs/screenshots/downloads.jpg" width="250" alt="Downloads manager">
+</p>
+
 ## Features
 
-- **One tap from YouTube:** Share → Tapnab starts the download with your saved choices.
+- **Pop-up over YouTube:** Share → Tapnab opens a small window right over YouTube. Pick MP3/MP4 and quality, tap Download, and you are back in YouTube.
+- **Browse tab:** YouTube inside Tapnab. A floating **Download** button appears on any video or playlist.
 - **MP3 or MP4**, with quality listed from low to high:
   - MP3: 64 · 96 · 128 · 192 · 256 · 320 kbps
   - MP4: 144p · 240p · 360p · 480p · 720p · 1080p · 1440p · 2160p · Best available
-- **Many links at once:** paste a list, every link becomes a queued download (2 run in parallel).
-- **Playlists:** optional "Download whole playlist" switch.
+- **Many links at once:** paste a list, every link becomes a queued download (1 to 4 run in parallel).
+- **Pick songs from a playlist** before downloading, with "already downloaded" marked. Songs are saved in a folder named after the playlist.
+- **Tidy file names:** "(Official Video)" tags and "| Channel" endings are removed (Original / Clean / Short styles).
+- **Cover art and tags** in MP3 files (thumbnail as album art).
+- **Downloads manager** like a browser's: All / Active / Done / Failed, grouped by date, search, sort, MP3/MP4 filter.
+- **Select many:** long-press to select, then **Play** in your music player, Share, Delete or Retry together.
+- **Duplicate detection:** warns before downloading the same video twice.
 - **Choose where files go**, like in Acode: saved folder list, tap to select, ✕ to forget, "Select folder" to add one. Works with internal storage, SD cards and **USB pendrives**.
+- **Settings:** Wi-Fi only, parallel downloads, file names, cover art, playlist folders, theme (system / light / dark).
+- **Self-updating engine:** the bundled yt-dlp refreshes itself about once a day (or tap Update now), so downloads keep working when YouTube changes.
 - **Keeps going in the background** with a progress notification.
-- **Plain files:** standard `.mp3` / `.mp4`, named after the video, safe for FAT32/exFAT drives.
-- **Update button** for the bundled yt-dlp engine, for when YouTube changes something.
+- **Plain files:** standard `.mp3` / `.mp4`, safe for FAT32/exFAT drives.
 
 ## No API key, no internet service of ours
 
@@ -100,7 +115,7 @@ DownloadService (foreground) keeps the process alive while the queue is busy.
 
 ## Troubleshooting
 
-- **"YouTube blocked this request"** → menu ⋮ → *Update yt-dlp engine*, then retry. YouTube changes often.
+- **"YouTube blocked this request"** → Settings → *Update now*, then retry. YouTube changes often.
 - **A video fails but others work** → it may be private, age-restricted or region-locked.
 - **Saved folder disappeared from the list** → Android revoked access (drive removed or reformatted). Select it again.
 

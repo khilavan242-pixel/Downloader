@@ -1,0 +1,650 @@
+package com.tapnab.app
+
+import android.content.ContentResolver
+import android.content.Context
+import android.net.Uri
+import android.net.wifi.WifiManager
+import android.provider.OpenableColumns
+import android.util.Log
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
+import java.io.ByteArrayOutputStream
+import java.io.FileInputStream
+import java.io.IOException
+import java.io.InputStream
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.ServerSocket
+import java.net.Socket
+import java.net.SocketTimeoutException
+import java.net.URL
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
+import kotlin.concurrent.thread
+
+/**
+ * Casts downloaded files to a DLNA / UPnP "MediaRenderer" on the same Wi-Fi,
+ * such as a set-top box or smart TV.
+ *
+ *  1. [discover] finds renderers with SSDP and reads their AVTransport address.
+ *  2. A tiny HTTP server on the phone serves the chosen files (with Range
+ *     support), because the TV pulls the video from the phone.
+ *  3. A session sends SetAVTransportURI + Play for each file and moves to the
+ *     next one when the TV reports the track ended, so a list plays back to back.
+ *
+ * Everything uses plain sockets, so no extra libraries and no cleartext-traffic
+ * switch are needed.
+ */
+object DlnaCaster {
+
+    private const val TAG = "DlnaCaster"
+
+    class Device(val name: String, val controlUrl: String, val serviceType: String) {
+        fun toMap(): Map<String, Any?> =
+            mapOf("name" to name, "controlUrl" to controlUrl, "serviceType" to serviceType)
+    }
+
+    /**
+     * One thing to play. For a downloaded file [uri] is a content:// address and the
+     * phone serves it. For a YouTube page ([stream] = true) [uri] is the page link:
+     * the stream address is looked up with yt-dlp when its turn comes and the TV
+     * fetches it straight from YouTube.
+     */
+    class Item(
+        val uri: String,
+        val title: String,
+        val mime: String,
+        val stream: Boolean = false,
+    )
+
+    /** Receives `{type:'cast', ...}` events; set by the Flutter channel. */
+    @Volatile var listener: ((Map<String, Any?>) -> Unit)? = null
+
+    @Volatile private var session: Session? = null
+
+    // ---- public API ---------------------------------------------------------------
+
+    /** Blocks for a few seconds while listening for devices. Call off the main thread. */
+    fun discover(context: Context, waitMs: Int = 3500): List<Device> {
+        val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+        val lock = wifi?.createMulticastLock("tapnab-ssdp")?.apply {
+            setReferenceCounted(false)
+            acquire()
+        }
+        val locations = LinkedHashSet<String>()
+        try {
+            DatagramSocket().use { sock ->
+                sock.soTimeout = 400
+                val msg = (
+                    "M-SEARCH * HTTP/1.1\r\n" +
+                        "HOST: 239.255.255.250:1900\r\n" +
+                        "MAN: \"ssdp:discover\"\r\n" +
+                        "MX: 2\r\n" +
+                        "ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n\r\n"
+                    ).toByteArray(Charsets.UTF_8)
+                val group = InetAddress.getByName("239.255.255.250")
+                for (i in 0 until 2) {
+                    sock.send(DatagramPacket(msg, msg.size, group, 1900))
+                    Thread.sleep(150)
+                }
+                val end = System.currentTimeMillis() + waitMs
+                val buf = ByteArray(4096)
+                val locationRx = Regex("(?im)^location:\\s*(\\S+)")
+                while (System.currentTimeMillis() < end) {
+                    try {
+                        val p = DatagramPacket(buf, buf.size)
+                        sock.receive(p)
+                        val text = String(p.data, 0, p.length, Charsets.UTF_8)
+                        locationRx.find(text)?.groupValues?.get(1)?.let { locations.add(it) }
+                    } catch (e: SocketTimeoutException) {
+                        // keep listening until the deadline
+                    }
+                }
+            }
+        } finally {
+            lock?.release()
+        }
+        return locations.mapNotNull { describe(it) }.distinctBy { it.controlUrl }
+    }
+
+    /** Starts (or replaces) a cast session. Call off the main thread. */
+    fun start(context: Context, device: Device, items: List<Item>) {
+        stopSession()
+        val app = context.applicationContext
+        val ip = localIpFor(device.controlUrl)
+        val server = MediaServer(app.contentResolver)
+        val s = Session(app, device, items, server, ip)
+        session = s
+        CastService.start(app, device.name)
+        thread(name = "dlna-session") { s.run() }
+    }
+
+    /** pause | resume | next | previous | stop */
+    fun control(action: String) {
+        val s = session ?: return
+        thread(name = "dlna-control") { s.control(action) }
+    }
+
+    fun state(): Map<String, Any?> = session?.toMap() ?: mapOf("type" to "cast", "status" to "idle")
+
+    /** Finds a direct, ready-to-play address for a YouTube link. Call off the main thread. */
+    private fun resolveStream(pageUrl: String, audioOnly: Boolean): Pair<String, String> {
+        TapnabApp.awaitReady()
+        val req = com.yausername.youtubedl_android.YoutubeDLRequest(pageUrl).apply {
+            addOption("--no-playlist")
+            addOption("--no-warnings")
+            if (audioOnly) {
+                addOption("-f", "bestaudio[ext=m4a]/bestaudio")
+            } else {
+                // One file with picture and sound together (TVs cannot join two streams).
+                addOption(
+                    "-f",
+                    "best[ext=mp4][vcodec^=avc1][acodec!=none][height<=720]/" +
+                        "best[ext=mp4][acodec!=none][height<=720]/best[ext=mp4][acodec!=none]/best[acodec!=none]",
+                )
+            }
+            addOption("--print", "%(title)s\t%(url)s")
+        }
+        val out = com.yausername.youtubedl_android.YoutubeDL.getInstance().execute(req, null) { _, _, _ -> }.out
+        val line = out.lineSequence().map { it.trim() }.lastOrNull { it.contains("http") }
+            ?: throw IOException("Could not get a playable address for this video.")
+        val title = line.substringBefore('\t', "")
+        val url = line.substringAfter('\t')
+        if (!url.startsWith("http")) throw IOException("Could not get a playable address for this video.")
+        return title to url
+    }
+
+    private fun stopSession() {
+        session?.let {
+            it.cancelled = true
+            it.shutdownQuietly()
+        }
+        session = null
+    }
+
+    private fun emit(map: Map<String, Any?>) {
+        listener?.invoke(map)
+    }
+
+    // ---- discovery helpers --------------------------------------------------------
+
+    private fun describe(location: String): Device? {
+        try {
+            val res = request("GET", location, emptyMap(), null)
+            if (res.status !in 200..299) return null
+            val xml = res.body
+            val name = Regex("<friendlyName>(.*?)</friendlyName>", RegexOption.DOT_MATCHES_ALL)
+                .find(xml)?.groupValues?.get(1)?.trim()?.let(::unesc) ?: "TV"
+            val base = Regex("<URLBase>(.*?)</URLBase>").find(xml)?.groupValues?.get(1)?.trim()
+            for (m in Regex("<service>(.*?)</service>", RegexOption.DOT_MATCHES_ALL).findAll(xml)) {
+                val block = m.groupValues[1]
+                val type = Regex("<serviceType>(.*?)</serviceType>").find(block)?.groupValues?.get(1)?.trim()
+                    ?: continue
+                if (!type.contains("AVTransport")) continue
+                val control = Regex("<controlURL>(.*?)</controlURL>").find(block)?.groupValues?.get(1)?.trim()
+                    ?: continue
+                val absolute = URL(URL(if (base.isNullOrEmpty()) location else base), control).toString()
+                return Device(name, absolute, type)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "could not read device description at $location", e)
+        }
+        return null
+    }
+
+    /** The phone's address on the network the TV is on. */
+    private fun localIpFor(controlUrl: String): String {
+        val u = URL(controlUrl)
+        Socket().use { s ->
+            s.connect(InetSocketAddress(u.host, if (u.port > 0) u.port else 80), 4000)
+            return s.localAddress.hostAddress ?: throw IOException("No Wi-Fi address")
+        }
+    }
+
+    // ---- minimal HTTP client over a raw socket -------------------------------------
+
+    private class Http(val status: Int, val body: String)
+
+    private fun request(method: String, url: String, headers: Map<String, String>, body: String?): Http {
+        val u = URL(url)
+        val port = if (u.port > 0) u.port else 80
+        Socket().use { s ->
+            s.connect(InetSocketAddress(u.host, port), 5000)
+            s.soTimeout = 7000
+            val bytes = body?.toByteArray(Charsets.UTF_8)
+            val path = if (u.file.isNullOrEmpty()) "/" else u.file
+            val head = StringBuilder()
+            head.append("$method $path HTTP/1.1\r\n")
+            head.append("HOST: ${u.host}:$port\r\n")
+            head.append("Connection: close\r\n")
+            for ((k, v) in headers) head.append("$k: $v\r\n")
+            if (bytes != null) head.append("Content-Length: ${bytes.size}\r\n")
+            head.append("\r\n")
+            val out = s.getOutputStream()
+            out.write(head.toString().toByteArray(Charsets.UTF_8))
+            if (bytes != null) out.write(bytes)
+            out.flush()
+
+            val input = BufferedInputStream(s.getInputStream())
+            val statusLine = readLine(input) ?: throw IOException("No answer from the device")
+            val status = statusLine.split(' ').getOrNull(1)?.toIntOrNull() ?: 0
+            val responseHeaders = HashMap<String, String>()
+            while (true) {
+                val line = readLine(input) ?: break
+                if (line.isEmpty()) break
+                val i = line.indexOf(':')
+                if (i > 0) responseHeaders[line.substring(0, i).trim().lowercase()] = line.substring(i + 1).trim()
+            }
+            val data = when {
+                responseHeaders["transfer-encoding"]?.contains("chunked", ignoreCase = true) == true ->
+                    readChunked(input)
+                responseHeaders["content-length"]?.toIntOrNull() != null ->
+                    readExactly(input, responseHeaders["content-length"]!!.toInt())
+                else -> input.readBytes()
+            }
+            return Http(status, String(data, Charsets.UTF_8))
+        }
+    }
+
+    private fun readLine(input: InputStream): String? {
+        val sb = StringBuilder()
+        while (true) {
+            val b = input.read()
+            if (b < 0) return if (sb.isEmpty()) null else sb.toString()
+            if (b == '\n'.code) return sb.toString().trimEnd('\r')
+            sb.append(b.toChar())
+        }
+    }
+
+    private fun readExactly(input: InputStream, n: Int): ByteArray {
+        val out = ByteArray(n)
+        var read = 0
+        while (read < n) {
+            val r = input.read(out, read, n - read)
+            if (r < 0) break
+            read += r
+        }
+        return if (read == n) out else out.copyOf(read)
+    }
+
+    private fun readChunked(input: InputStream): ByteArray {
+        val out = ByteArrayOutputStream()
+        while (true) {
+            val size = (readLine(input) ?: break).substringBefore(';').trim().toIntOrNull(16) ?: break
+            if (size == 0) break
+            out.write(readExactly(input, size))
+            readLine(input) // CRLF after each chunk
+        }
+        return out.toByteArray()
+    }
+
+    // ---- XML helpers --------------------------------------------------------------
+
+    private fun esc(s: String) = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        .replace("\"", "&quot;").replace("'", "&apos;")
+
+    private fun unesc(s: String) = s.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"")
+        .replace("&apos;", "'").replace("&amp;", "&")
+
+    private fun didl(title: String, url: String, mime: String): String {
+        val isVideo = mime.startsWith("video")
+        val cls = if (isVideo) "object.item.videoItem" else "object.item.audioItem.musicTrack"
+        val flags = "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
+        return "<DIDL-Lite xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\" " +
+            "xmlns:dc=\"http://purl.org/dc/elements/1.1/\" " +
+            "xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\">" +
+            "<item id=\"0\" parentID=\"-1\" restricted=\"1\">" +
+            "<dc:title>${esc(title)}</dc:title>" +
+            "<upnp:class>$cls</upnp:class>" +
+            "<res protocolInfo=\"http-get:*:$mime:$flags\">${esc(url)}</res>" +
+            "</item></DIDL-Lite>"
+    }
+
+    // ---- HTTP server that hands the files to the TV ---------------------------------
+
+    private class MediaServer(private val resolver: ContentResolver) {
+        private val files = ConcurrentHashMap<String, Pair<Uri, String>>()
+        private val socket = ServerSocket(0)
+        private val pool = Executors.newCachedThreadPool()
+
+        @Volatile private var running = true
+
+        val port: Int get() = socket.localPort
+
+        init {
+            thread(name = "dlna-http", isDaemon = true) {
+                while (running) {
+                    try {
+                        val client = socket.accept()
+                        pool.execute { handle(client) }
+                    } catch (e: Exception) {
+                        if (!running) break
+                    }
+                }
+            }
+        }
+
+        fun register(uri: Uri, mime: String, ext: String): String {
+            val name = "${UUID.randomUUID()}.$ext"
+            files[name] = uri to mime
+            return name
+        }
+
+        fun stop() {
+            running = false
+            try {
+                socket.close()
+            } catch (e: Exception) {
+                // already closed
+            }
+            pool.shutdownNow()
+        }
+
+        private fun querySize(uri: Uri): Long = try {
+            resolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use {
+                if (it.moveToFirst() && !it.isNull(0)) it.getLong(0) else -1L
+            } ?: -1L
+        } catch (e: Exception) {
+            -1L
+        }
+
+        private fun reply(out: BufferedOutputStream, status: String, extra: String = "") {
+            out.write(("HTTP/1.1 $status\r\n${extra}Content-Length: 0\r\nConnection: close\r\n\r\n").toByteArray())
+            out.flush()
+        }
+
+        private fun handle(client: Socket) {
+            try {
+                client.use { sock ->
+                    sock.soTimeout = 30000
+                    val input = BufferedInputStream(sock.getInputStream())
+                    val out = BufferedOutputStream(sock.getOutputStream())
+                    val requestLine = readLine(input) ?: return
+                    val parts = requestLine.split(' ')
+                    if (parts.size < 2) return
+                    val method = parts[0]
+                    val name = parts[1].substringBefore('?').removePrefix("/m/")
+                    var range: String? = null
+                    while (true) {
+                        val line = readLine(input) ?: break
+                        if (line.isEmpty()) break
+                        if (line.startsWith("range:", ignoreCase = true)) range = line.substring(6).trim()
+                    }
+                    val entry = files[name]
+                    if (entry == null) {
+                        reply(out, "404 Not Found")
+                        return
+                    }
+                    val pfd = try {
+                        resolver.openFileDescriptor(entry.first, "r")
+                    } catch (e: Exception) {
+                        null
+                    }
+                    if (pfd == null) {
+                        reply(out, "404 Not Found")
+                        return
+                    }
+                    pfd.use { fd ->
+                        var size = fd.statSize
+                        if (size < 0) size = querySize(entry.first)
+                        var start = 0L
+                        var end = size - 1
+                        var partial = false
+                        val m = if (range != null && size > 0) Regex("bytes=(\\d*)-(\\d*)").find(range!!) else null
+                        if (m != null) {
+                            val a = m.groupValues[1]
+                            val b = m.groupValues[2]
+                            if (a.isNotEmpty()) {
+                                start = a.toLong()
+                                if (b.isNotEmpty()) end = minOf(b.toLong(), size - 1)
+                            } else if (b.isNotEmpty()) {
+                                start = maxOf(0L, size - b.toLong())
+                            }
+                            partial = true
+                        }
+                        if (size > 0 && start >= size) {
+                            reply(out, "416 Range Not Satisfiable", "Content-Range: bytes */$size\r\n")
+                            return
+                        }
+                        val length = if (size > 0) end - start + 1 else -1L
+                        val head = StringBuilder()
+                        head.append(if (partial) "HTTP/1.1 206 Partial Content\r\n" else "HTTP/1.1 200 OK\r\n")
+                        head.append("Content-Type: ${entry.second}\r\n")
+                        head.append("Accept-Ranges: bytes\r\n")
+                        if (length >= 0) head.append("Content-Length: $length\r\n")
+                        if (partial) head.append("Content-Range: bytes $start-$end/$size\r\n")
+                        head.append("transferMode.dlna.org: Streaming\r\n")
+                        head.append("contentFeatures.dlna.org: DLNA.ORG_OP=01;DLNA.ORG_CI=0;")
+                        head.append("DLNA.ORG_FLAGS=01700000000000000000000000000000\r\n")
+                        head.append("Connection: close\r\n\r\n")
+                        out.write(head.toString().toByteArray())
+                        if (method != "HEAD") {
+                            // Not closed on purpose: closing it would close the descriptor that `pfd` owns.
+                            val ins = FileInputStream(fd.fileDescriptor)
+                            if (start > 0) {
+                                try {
+                                    ins.channel.position(start)
+                                } catch (e: Exception) {
+                                    var skipped = 0L
+                                    while (skipped < start) {
+                                        val s = ins.skip(start - skipped)
+                                        if (s <= 0) break
+                                        skipped += s
+                                    }
+                                }
+                            }
+                            val buf = ByteArray(64 * 1024)
+                            var left = if (length >= 0) length else Long.MAX_VALUE
+                            while (left > 0) {
+                                val n = ins.read(buf, 0, minOf(buf.size.toLong(), left).toInt())
+                                if (n < 0) break
+                                out.write(buf, 0, n)
+                                left -= n
+                            }
+                        }
+                        out.flush()
+                    }
+                }
+            } catch (e: IOException) {
+                // The TV closes connections whenever it seeks or switches track.
+            } catch (e: Exception) {
+                Log.w(TAG, "serving a file failed", e)
+            }
+        }
+    }
+
+    // ---- one casting session ---------------------------------------------------------
+
+    private class Session(
+        val app: Context,
+        val device: Device,
+        val items: List<Item>,
+        val server: MediaServer,
+        val ip: String,
+    ) {
+        @Volatile var cancelled = false
+        @Volatile var index = 0
+        @Volatile var status = "connecting"
+        @Volatile var error: String? = null
+        private val liveTitles = ConcurrentHashMap<Int, String>()
+
+        @Volatile private var jumpTo = -1
+        @Volatile private var finishedUp = false
+
+        fun toMap(): Map<String, Any?> = mapOf(
+            "type" to "cast",
+            "status" to status,
+            "device" to device.name,
+            "title" to (liveTitles[index]?.takeIf { it.isNotBlank() } ?: items.getOrNull(index)?.title),
+            "index" to index,
+            "count" to items.size,
+            "error" to error,
+        )
+
+        private fun publish(newStatus: String) {
+            status = newStatus
+            emit(toMap())
+        }
+
+        private fun soap(action: String, args: String): String {
+            val body = "<?xml version=\"1.0\" encoding=\"utf-8\"?>" +
+                "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" " +
+                "s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body>" +
+                "<u:$action xmlns:u=\"${device.serviceType}\">$args</u:$action>" +
+                "</s:Body></s:Envelope>"
+            val res = request(
+                "POST", device.controlUrl,
+                mapOf(
+                    "Content-Type" to "text/xml; charset=\"utf-8\"",
+                    "SOAPACTION" to "\"${device.serviceType}#$action\"",
+                ),
+                body,
+            )
+            if (res.status !in 200..299) throw IOException("The TV refused \"$action\" (HTTP ${res.status})")
+            return res.body
+        }
+
+        private fun transportState(): String? {
+            val xml = soap("GetTransportInfo", "<InstanceID>0</InstanceID>")
+            return Regex("<CurrentTransportState>(.*?)</CurrentTransportState>").find(xml)?.groupValues?.get(1)
+        }
+
+        fun run() {
+            try {
+                while (index < items.size && !cancelled) {
+                    val item = items[index]
+                    publish("loading")
+                    var title = item.title
+                    val url: String
+                    if (item.stream) {
+                        val (found, address) = resolveStream(item.uri, item.mime.startsWith("audio"))
+                        if (found.isNotBlank()) {
+                            title = found
+                            liveTitles[index] = found
+                        }
+                        url = address
+                    } else {
+                        val ext = when (item.mime) {
+                            "audio/mpeg" -> "mp3"
+                            "video/mp4" -> "mp4"
+                            else -> item.mime.substringAfter('/', "bin")
+                        }
+                        val name = server.register(Uri.parse(item.uri), item.mime, ext)
+                        url = "http://$ip:${server.port}/m/$name"
+                    }
+                    if (cancelled) break
+                    try {
+                        soap("Stop", "<InstanceID>0</InstanceID>")
+                    } catch (e: Exception) {
+                        // nothing was playing
+                    }
+                    soap(
+                        "SetAVTransportURI",
+                        "<InstanceID>0</InstanceID><CurrentURI>${esc(url)}</CurrentURI>" +
+                            "<CurrentURIMetaData>${esc(didl(title, url, item.mime))}</CurrentURIMetaData>",
+                    )
+                    soap("Play", "<InstanceID>0</InstanceID><Speed>1</Speed>")
+                    publish("playing")
+                    waitForEnd()
+                    if (cancelled) break
+                    index = if (jumpTo >= 0) jumpTo else index + 1
+                    jumpTo = -1
+                }
+                // "Next" on the last item (or the list ending) leaves the TV idle.
+                if (!cancelled) {
+                    try {
+                        soap("Stop", "<InstanceID>0</InstanceID>")
+                    } catch (e: Exception) {
+                        // TV already stopped
+                    }
+                }
+            } catch (e: Throwable) {
+                if (!cancelled) {
+                    Log.w(TAG, "cast failed", e)
+                    error = e.message ?: "Casting failed"
+                }
+            } finally {
+                finishUp()
+            }
+        }
+
+        /** Returns when the current track is over (or the user skipped / stopped). */
+        private fun waitForEnd() {
+            var seenPlaying = false
+            var failures = 0
+            val began = System.currentTimeMillis()
+            while (!cancelled && jumpTo < 0) {
+                Thread.sleep(2000)
+                val state = try {
+                    transportState().also { failures = 0 }
+                } catch (e: Exception) {
+                    failures++
+                    if (failures >= 5) throw IOException("Lost connection to the TV")
+                    null
+                }
+                when (state) {
+                    "PLAYING", "TRANSITIONING" -> {
+                        seenPlaying = true
+                        if (status != "playing") publish("playing")
+                    }
+                    "PAUSED_PLAYBACK" -> if (status != "paused") publish("paused")
+                    "STOPPED", "NO_MEDIA_PRESENT" -> {
+                        if (seenPlaying) return
+                        if (System.currentTimeMillis() - began > 30000) {
+                            throw IOException(
+                                "The TV did not start playing. It may not support this file type " +
+                                    "(MP4 video or MP3 audio is usually fine).",
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        fun control(action: String) {
+            try {
+                when (action) {
+                    "pause" -> {
+                        soap("Pause", "<InstanceID>0</InstanceID>")
+                        publish("paused")
+                    }
+                    "resume" -> {
+                        soap("Play", "<InstanceID>0</InstanceID><Speed>1</Speed>")
+                        publish("playing")
+                    }
+                    "next" -> jumpTo = minOf(index + 1, items.size)
+                    "previous" -> jumpTo = maxOf(index - 1, 0)
+                    "stop" -> {
+                        cancelled = true
+                        try {
+                            soap("Stop", "<InstanceID>0</InstanceID>")
+                        } catch (e: Exception) {
+                            // TV already gone
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "control $action failed", e)
+            }
+        }
+
+        fun shutdownQuietly() {
+            finishUp(announce = false)
+        }
+
+        private fun finishUp(announce: Boolean = true) {
+            if (finishedUp) return
+            finishedUp = true
+            server.stop()
+            CastService.stop(app)
+            if (session === this) session = null
+            if (announce) {
+                status = if (error != null) "error" else "stopped"
+                emit(toMap())
+            }
+        }
+    }
+}

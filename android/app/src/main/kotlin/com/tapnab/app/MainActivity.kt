@@ -62,11 +62,13 @@ class MainActivity : FlutterActivity() {
             override fun onListen(arguments: Any?, events: EventChannel.EventSink) {
                 eventSink = events
                 DownloadManager.listener = { map -> main.post { eventSink?.success(map) } }
+                DlnaCaster.listener = { map -> main.post { eventSink?.success(map) } }
             }
 
             override fun onCancel(arguments: Any?) {
                 eventSink = null
                 DownloadManager.listener = null
+                DlnaCaster.listener = null
             }
         })
 
@@ -289,6 +291,52 @@ class MainActivity : FlutterActivity() {
                     result.success(false)
                 }
             }
+
+            "castDiscover" -> thread(name = "dlna-discover") {
+                val list = try {
+                    DlnaCaster.discover(applicationContext).map { it.toMap() }
+                } catch (e: Throwable) {
+                    emptyList()
+                }
+                main.post { result.success(list) }
+            }
+
+            "castPlay" -> {
+                val device = call.argument<Map<String, Any?>>("device")
+                val items = call.argument<List<Map<String, Any?>>>("items").orEmpty()
+                val control = device?.get("controlUrl") as? String
+                val type = device?.get("serviceType") as? String
+                if (device == null || control == null || type == null || items.isEmpty()) {
+                    result.error("bad_args", "device and items are required", null)
+                    return
+                }
+                thread(name = "dlna-start") {
+                    try {
+                        DlnaCaster.start(
+                            applicationContext,
+                            DlnaCaster.Device(device["name"] as? String ?: "TV", control, type),
+                            items.map {
+                                DlnaCaster.Item(
+                                    it["uri"] as? String ?: "",
+                                    it["title"] as? String ?: "",
+                                    it["mime"] as? String ?: "video/mp4",
+                                    it["stream"] as? Boolean ?: false,
+                                )
+                            },
+                        )
+                        main.post { result.success(true) }
+                    } catch (e: Throwable) {
+                        main.post { result.error("cast_failed", e.message ?: "Could not reach the TV", null) }
+                    }
+                }
+            }
+
+            "castControl" -> {
+                DlnaCaster.control(call.argument<String>("action") ?: "")
+                result.success(null)
+            }
+
+            "castState" -> result.success(DlnaCaster.state())
 
             "consumeSharedText" -> {
                 val t = pendingShared

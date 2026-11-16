@@ -23,7 +23,7 @@ void showHowTo(BuildContext context) {
             const _Step(n: 4, text: 'Playlist links let you choose which songs to download.'),
             const _Step(n: 5, text: 'Follow progress in Downloads. Tap a finished item to play it.'),
             const _Step(n: 6, text: 'Long-press items to select several: play, share or delete them together.'),
-            const _Step(n: 7, text: 'Play on TV: turn on DLNA on your TV or set-top box (same Wi-Fi), tap the TV button on a video, a link, or selected downloads. Lists play one after another.'),
+            const _Step(n: 7, text: 'Play on TV: turn on DLNA on your TV or set-top box (same Wi-Fi). In Browse tap the cast icon once to connect; then tap any video and it plays on the TV, followed by related videos. You stay connected until you choose Disconnect. The menu also plays local files from your phone.'),
           ],
         ),
       ),
@@ -35,7 +35,7 @@ void showAbout(BuildContext context) {
   showAboutDialog(
     context: context,
     applicationName: 'Tapnab',
-    applicationVersion: '1.2.0',
+    applicationVersion: '1.3.0',
     applicationIcon: const LogoMark(size: 48),
     children: const [
       SizedBox(height: 12),

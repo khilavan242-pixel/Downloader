@@ -127,6 +127,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     switch (value) {
       case 'settings':
         widget.onOpenSettings();
+      case 'local':
+        castLocalFiles(context, c);
       case 'how':
         showHowTo(context);
       case 'about':
@@ -259,6 +261,15 @@ class _Header extends StatelessWidget {
                 contentPadding: EdgeInsets.zero,
                 leading: Icon(Icons.settings_rounded),
                 title: Text('Settings'),
+              ),
+            ),
+            PopupMenuItem(
+              value: 'local',
+              child: ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.cast_rounded),
+                title: Text('Play local files on TV'),
               ),
             ),
             PopupMenuItem(

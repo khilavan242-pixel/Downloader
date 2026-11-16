@@ -125,3 +125,14 @@ class _DeviceSheetState extends State<_DeviceSheet> {
     );
   }
 }
+
+/// Picks audio / video files on the phone and plays them on the TV.
+/// Uses the connected TV, or asks which one when none is connected.
+Future<void> castLocalFiles(BuildContext context, DownloadController c) async {
+  final items = await c.pickLocalMedia();
+  if (items.isEmpty) return;
+  if (!context.mounted) return;
+  final device = c.castTarget ?? await pickCastDevice(context, c);
+  if (device == null) return;
+  await c.castMedia(device, items);
+}

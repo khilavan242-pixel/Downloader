@@ -1,18 +1,34 @@
 /// A TV, set-top box or speaker found on the Wi-Fi that can play media (DLNA).
 class CastDevice {
-  const CastDevice({required this.name, required this.controlUrl, required this.serviceType});
+  const CastDevice({
+    required this.name,
+    required this.controlUrl,
+    required this.serviceType,
+    this.renderUrl,
+    this.renderType,
+  });
 
   final String name;
   final String controlUrl;
   final String serviceType;
+  final String? renderUrl;
+  final String? renderType;
 
   factory CastDevice.fromMap(Map<dynamic, dynamic> m) => CastDevice(
         name: m['name'] as String? ?? 'TV',
         controlUrl: m['controlUrl'] as String? ?? '',
         serviceType: m['serviceType'] as String? ?? '',
+        renderUrl: m['renderUrl'] as String?,
+        renderType: m['renderType'] as String?,
       );
 
-  Map<String, Object?> toMap() => {'name': name, 'controlUrl': controlUrl, 'serviceType': serviceType};
+  Map<String, Object?> toMap() => {
+        'name': name,
+        'controlUrl': controlUrl,
+        'serviceType': serviceType,
+        'renderUrl': renderUrl,
+        'renderType': renderType,
+      };
 }
 
 /// One thing to play on the TV: a saved file, or a YouTube link played as a stream.
@@ -33,6 +49,8 @@ class CastState {
     this.status = 'idle',
     this.device = '',
     this.title,
+    this.uri,
+    this.volume = -1,
     this.index = 0,
     this.count = 0,
     this.error,
@@ -43,6 +61,8 @@ class CastState {
   final String status;
   final String device;
   final String? title;
+  final String? uri;
+  final int volume;
   final int index;
   final int count;
   final String? error;
@@ -56,8 +76,18 @@ class CastState {
         status: m['status'] as String? ?? 'idle',
         device: m['device'] as String? ?? '',
         title: m['title'] as String?,
+        uri: m['uri'] as String?,
+        volume: (m['volume'] as num?)?.toInt() ?? -1,
         index: (m['index'] as num?)?.toInt() ?? 0,
         count: (m['count'] as num?)?.toInt() ?? 0,
         error: m['error'] as String?,
       );
+}
+
+/// Playback position on the TV, in seconds.
+class CastProgress {
+  const CastProgress({this.position = 0, this.duration = 0});
+
+  final int position;
+  final int duration;
 }

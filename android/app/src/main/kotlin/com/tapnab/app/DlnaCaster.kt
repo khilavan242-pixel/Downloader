@@ -584,7 +584,7 @@ object DlnaCaster {
             }
         }
 
-        private fun setVolume(level: Int) {
+        private fun changeVolume(level: Int) {
             val v = level.coerceIn(0, 100)
             rendering("SetVolume", "<InstanceID>0</InstanceID><Channel>Master</Channel><DesiredVolume>$v</DesiredVolume>")
             volume = v
@@ -712,10 +712,10 @@ object DlnaCaster {
                         lastPosition = value
                         emit(mapOf("type" to "castPos", "position" to value, "duration" to lastDuration, "volume" to volume))
                     }
-                    "volume" -> setVolume(value)
+                    "volume" -> changeVolume(value)
                     "volumeUp", "volumeDown" -> {
                         if (volume < 0) readVolume()
-                        if (volume >= 0) setVolume(volume + if (action == "volumeUp") 5 else -5)
+                        if (volume >= 0) changeVolume(volume + if (action == "volumeUp") 5 else -5)
                     }
                     "pause" -> {
                         soap("Pause", "<InstanceID>0</InstanceID>")

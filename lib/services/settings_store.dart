@@ -22,6 +22,7 @@ class SettingsStore {
   static const _kParallel = 'parallel';
   static const _kAutoUpdate = 'auto_update';
   static const _kThemeMode = 'theme_mode';
+  static const _kCastDevice = 'cast_device';
 
   static Future<SettingsStore> open() async =>
       SettingsStore(await SharedPreferences.getInstance());
@@ -81,4 +82,14 @@ class SettingsStore {
         _ => ThemeMode.system,
       };
   set themeMode(ThemeMode v) => _prefs.setString(_kThemeMode, v.name);
+
+  /// The TV Tapnab stays connected to until the user disconnects (JSON), or null.
+  String? get castDevice => _prefs.getString(_kCastDevice);
+  set castDevice(String? v) {
+    if (v == null) {
+      _prefs.remove(_kCastDevice);
+    } else {
+      _prefs.setString(_kCastDevice, v);
+    }
+  }
 }

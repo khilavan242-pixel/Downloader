@@ -135,8 +135,26 @@ class NativeBridge {
         {'device': device.toMap(), 'items': items.map((i) => i.toMap()).toList()},
       );
 
-  /// `pause`, `resume`, `next`, `previous` or `stop`.
-  Future<void> castControl(String action) => _methods.invokeMethod<void>('castControl', {'action': action});
+  /// `pause`, `resume`, `next`, `previous`, `stop`, `seek` (value = seconds) or `volume` (0-100).
+  Future<void> castControl(String action, {int value = 0}) =>
+      _methods.invokeMethod<void>('castControl', {'action': action, 'value': value});
+
+  /// Adds more items to the end of the running TV queue.
+  Future<void> castAppend(List<CastItem> items) =>
+      _methods.invokeMethod<void>('castAppend', {'items': items.map((i) => i.toMap()).toList()});
+
+  /// Lets the user pick audio / video files from the phone. Empty when cancelled.
+  Future<List<CastItem>> pickMedia() async {
+    final raw = await _methods.invokeListMethod<Map<dynamic, dynamic>>('pickMedia');
+    return (raw ?? const [])
+        .map((m) => CastItem(
+              uri: m['uri'] as String? ?? '',
+              title: m['title'] as String? ?? 'Media',
+              mime: m['mime'] as String? ?? 'video/mp4',
+            ))
+        .where((i) => i.uri.isNotEmpty)
+        .toList();
+  }
 
   Future<CastState> castState() async {
     final raw = await _methods.invokeMapMethod<dynamic, dynamic>('castState');

@@ -266,7 +266,7 @@ class BrowsePageState extends State<BrowsePage> {
                     top: 0,
                     child: LinearProgressIndicator(value: _progress / 100, minHeight: 3),
                   ),
-                if (showPanel && pageId != null)
+                if (showPanel)
                   Positioned.fromRect(
                     rect: panel,
                     child: TvPlayerPanel(

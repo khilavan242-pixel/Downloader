@@ -32,6 +32,7 @@ class MainActivity : FlutterActivity() {
 
     private var eventSink: EventChannel.EventSink? = null
     private var pendingFolderResult: MethodChannel.Result? = null
+    private var pendingMediaResult: MethodChannel.Result? = null
     private var pendingShared: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -314,7 +315,13 @@ class MainActivity : FlutterActivity() {
                     try {
                         DlnaCaster.start(
                             applicationContext,
-                            DlnaCaster.Device(device["name"] as? String ?: "TV", control, type),
+                            DlnaCaster.Device(
+                                device["name"] as? String ?: "TV",
+                                control,
+                                type,
+                                (device["renderUrl"] as? String)?.takeIf { it.isNotEmpty() },
+                                (device["renderType"] as? String)?.takeIf { it.isNotEmpty() },
+                            ),
                             items.map {
                                 DlnaCaster.Item(
                                     it["uri"] as? String ?: "",
@@ -332,11 +339,43 @@ class MainActivity : FlutterActivity() {
             }
 
             "castControl" -> {
-                DlnaCaster.control(call.argument<String>("action") ?: "")
+                DlnaCaster.control(call.argument<String>("action") ?: "", call.argument<Int>("value") ?: 0)
                 result.success(null)
             }
 
             "castState" -> result.success(DlnaCaster.state())
+
+            "castAppend" -> {
+                val items = call.argument<List<Map<String, Any?>>>("items").orEmpty()
+                DlnaCaster.append(
+                    items.map {
+                        DlnaCaster.Item(
+                            it["uri"] as? String ?: "",
+                            it["title"] as? String ?: "",
+                            it["mime"] as? String ?: "video/mp4",
+                            it["stream"] as? Boolean ?: false,
+                        )
+                    },
+                )
+                result.success(null)
+            }
+
+            "pickMedia" -> {
+                if (pendingMediaResult != null) {
+                    result.error("busy", "File picker already open", null)
+                    return
+                }
+                pendingMediaResult = result
+                val pick = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "*/*"
+                    putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("audio/*", "video/*"))
+                    putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+                }
+                @Suppress("DEPRECATION")
+                startActivityForResult(pick, REQUEST_MEDIA)
+            }
 
             "consumeSharedText" -> {
                 val t = pendingShared
@@ -350,6 +389,35 @@ class MainActivity : FlutterActivity() {
 
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (requestCode == REQUEST_MEDIA) {
+            val pending = pendingMediaResult ?: return
+            pendingMediaResult = null
+            val picked = ArrayList<Uri>()
+            data?.clipData?.let { clip -> for (i in 0 until clip.itemCount) picked.add(clip.getItemAt(i).uri) }
+            data?.data?.let { if (picked.isEmpty()) picked.add(it) }
+            if (resultCode != RESULT_OK || picked.isEmpty()) {
+                pending.success(emptyList<Map<String, Any?>>())
+                return
+            }
+            val list = picked.map { uri ->
+                try {
+                    contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                } catch (e: Exception) {
+                    // a temporary grant is enough while casting
+                }
+                var name = uri.lastPathSegment ?: "Media"
+                try {
+                    contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
+                        ?.use { c -> if (c.moveToFirst()) name = c.getString(0) ?: name }
+                } catch (e: Exception) {
+                    // keep the fallback name
+                }
+                val mime = contentResolver.getType(uri) ?: "video/mp4"
+                mapOf("uri" to uri.toString(), "title" to name.substringBeforeLast('.'), "mime" to mime)
+            }
+            pending.success(list)
+            return
+        }
         if (requestCode != REQUEST_FOLDER) {
             @Suppress("DEPRECATION")
             super.onActivityResult(requestCode, resultCode, data)
@@ -367,6 +435,17 @@ class MainActivity : FlutterActivity() {
         } catch (e: Exception) {
             result.error("folder_failed", e.message ?: "Could not use that folder", null)
         }
+    }
+
+    /** While casting, the phone's volume keys change the TV volume, like in the YouTube app. */
+    override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent): Boolean {
+        if ((keyCode == android.view.KeyEvent.KEYCODE_VOLUME_UP || keyCode == android.view.KeyEvent.KEYCODE_VOLUME_DOWN) &&
+            DlnaCaster.canControlVolume()
+        ) {
+            DlnaCaster.control(if (keyCode == android.view.KeyEvent.KEYCODE_VOLUME_UP) "volumeUp" else "volumeDown")
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
     }
 
     private fun captureShared(intent: Intent?) {
@@ -387,5 +466,6 @@ class MainActivity : FlutterActivity() {
 
     private companion object {
         const val REQUEST_FOLDER = 4201
+        const val REQUEST_MEDIA = 4202
     }
 }

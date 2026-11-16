@@ -597,6 +597,7 @@ object DlnaCaster {
                 lastDuration = parseClock(Regex("<TrackDuration>(.*?)</TrackDuration>").find(xml)?.groupValues?.get(1))
                 lastPosition = parseClock(Regex("<RelTime>(.*?)</RelTime>").find(xml)?.groupValues?.get(1))
                 emit(mapOf("type" to "castPos", "position" to lastPosition, "duration" to lastDuration, "volume" to volume))
+                CastService.progress(app, lastPosition, lastDuration)
             } catch (e: Exception) {
                 // progress is optional
             }
@@ -611,11 +612,22 @@ object DlnaCaster {
             try {
                 while (index < items.size && !cancelled) {
                     val item = items[index]
+                    lastPosition = -1
+                    lastDuration = -1
                     publish("loading")
                     var title = item.title
                     val url: String
                     if (item.stream) {
-                        val (found, address) = resolveStream(item.uri, item.mime.startsWith("audio"))
+                        val resolved = try {
+                            resolveStream(item.uri, item.mime.startsWith("audio"))
+                        } catch (e: Exception) {
+                            // One video that cannot be played should not end the whole queue.
+                            if (cancelled || index + 1 >= items.size) throw e
+                            Log.w(TAG, "skipping unplayable item", e)
+                            index += 1
+                            continue
+                        }
+                        val (found, address) = resolved
                         if (found.isNotBlank()) {
                             title = found
                             liveTitles[index] = found
@@ -669,6 +681,7 @@ object DlnaCaster {
         /** Returns when the current track is over (or the user skipped / stopped). */
         private fun waitForEnd() {
             var seenPlaying = false
+            var atEnd = 0
             var failures = 0
             val began = System.currentTimeMillis()
             while (!cancelled && jumpTo < 0) {
@@ -686,6 +699,9 @@ object DlnaCaster {
                         seenPlaying = true
                         if (status != "playing") publish("playing")
                         pollPosition()
+                        // Some set-top boxes stay on "playing" at the very end: treat that as finished.
+                        if (lastDuration > 5 && lastPosition >= lastDuration - 1) atEnd++ else atEnd = 0
+                        if (atEnd >= 3) return
                     }
                     "PAUSED_PLAYBACK" -> {
                         if (status != "paused") publish("paused")
@@ -711,6 +727,7 @@ object DlnaCaster {
                         soap("Seek", "<InstanceID>0</InstanceID><Unit>REL_TIME</Unit><Target>${clock(value)}</Target>")
                         lastPosition = value
                         emit(mapOf("type" to "castPos", "position" to value, "duration" to lastDuration, "volume" to volume))
+                        CastService.progress(app, value, lastDuration)
                     }
                     "volume" -> changeVolume(value)
                     "volumeUp", "volumeDown" -> {
@@ -752,7 +769,7 @@ object DlnaCaster {
             CastService.stop(app)
             if (session === this) session = null
             if (announce) {
-                status = if (error != null) "error" else "stopped"
+                status = if (error != null) "error" else if (cancelled) "stopped" else "ended"
                 emit(toMap())
             }
         }

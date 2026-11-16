@@ -345,6 +345,24 @@ class MainActivity : FlutterActivity() {
 
             "castState" -> result.success(DlnaCaster.state())
 
+            "mediaThumb" -> {
+                val uriText = call.argument<String>("uri") ?: ""
+                kotlin.concurrent.thread(name = "media-thumb") {
+                    var bytes: ByteArray? = null
+                    try {
+                        val bmp = MediaThumbs.load(applicationContext, uriText)
+                        if (bmp != null) {
+                            val out = java.io.ByteArrayOutputStream()
+                            bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, out)
+                            bytes = out.toByteArray()
+                        }
+                    } catch (e: Exception) {
+                        // no picture available
+                    }
+                    runOnUiThread { result.success(bytes) }
+                }
+            }
+
             "castAppend" -> {
                 val items = call.argument<List<Map<String, Any?>>>("items").orEmpty()
                 DlnaCaster.append(

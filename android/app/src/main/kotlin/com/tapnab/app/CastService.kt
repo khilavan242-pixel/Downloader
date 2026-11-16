@@ -11,15 +11,21 @@ import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.drawable.Icon
+import android.media.MediaMetadata
+import android.media.session.MediaSession
+import android.media.session.PlaybackState
 import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.IBinder
 import androidx.core.content.ContextCompat
 import java.net.URL
 import kotlin.concurrent.thread
 
 /**
- * Keeps the app alive while it is casting to a TV, and shows a media-style
- * notification (previous, play/pause, next, stop) like a video player.
+ * Keeps the app alive while it is casting to a TV and shows a media notification
+ * (picture, seek bar, previous / play-pause / next / stop) backed by a MediaSession.
  */
 class CastService : Service() {
 
@@ -31,6 +37,7 @@ class CastService : Service() {
         if (lastState == null || lastState?.get("device") != device) {
             lastState = mapOf("status" to "loading", "device" to device)
         }
+        applySession(applicationContext, lastState!!)
         val notification = build(this, lastState!!)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
@@ -42,6 +49,7 @@ class CastService : Service() {
 
     override fun onDestroy() {
         running = false
+        releaseSession()
         super.onDestroy()
     }
 
@@ -57,9 +65,14 @@ class CastService : Service() {
 
         @Volatile private var running = false
         @Volatile private var lastState: Map<String, Any?>? = null
-        @Volatile private var thumbId: String? = null
+        @Volatile private var thumbKey: String? = null
         @Volatile private var thumb: Bitmap? = null
         @Volatile private var thumbLoading: String? = null
+        @Volatile private var positionSec = 0
+        @Volatile private var durationSec = 0
+        private var session: MediaSession? = null
+        private var metaKey: String? = null
+        private var shownUri: String? = null
 
         fun start(context: Context, deviceName: String) {
             val intent = Intent(context, CastService::class.java).putExtra(EXTRA_DEVICE, deviceName)
@@ -73,55 +86,155 @@ class CastService : Service() {
 
         /** Refreshes the notification with the latest playback state. */
         fun update(context: Context, state: Map<String, Any?>) {
+            val app = context.applicationContext
+            val uri = state["uri"] as? String
+            if (uri != shownUri) {
+                shownUri = uri
+                positionSec = 0
+                durationSec = 0
+            }
             lastState = state
             if (!running) return
-            val app = context.applicationContext
+            applySession(app, state)
+            notifyNow(app, state)
+            loadThumb(app, state)
+        }
+
+        /** Playback position from the TV, in seconds (drives the seek bar). */
+        fun progress(context: Context, position: Int, duration: Int) {
+            positionSec = position
+            durationSec = duration
+            val s = lastState ?: return
+            if (running) applySession(context.applicationContext, s)
+        }
+
+        private fun notifyNow(app: Context, state: Map<String, Any?>) {
             try {
                 val nm = app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
                 nm.notify(NOTIFICATION_ID, build(app, state))
             } catch (e: Exception) {
                 // Notifications may be blocked; casting still works.
             }
-            loadThumb(app, state)
         }
 
         private val idRegex = Regex("""(?:v=|youtu\.be/|shorts/)([A-Za-z0-9_-]{11})""")
 
+        private fun keyFor(state: Map<String, Any?>): String? {
+            val uri = state["uri"] as? String ?: return null
+            return idRegex.find(uri)?.groupValues?.get(1) ?: uri
+        }
+
         private fun loadThumb(app: Context, state: Map<String, Any?>) {
-            val uri = state["pageUrl"] as? String ?: state["uri"] as? String ?: return
-            val id = idRegex.find(uri)?.groupValues?.get(1) ?: return
-            if (id == thumbId || id == thumbLoading) return
-            thumbLoading = id
+            val uri = state["uri"] as? String ?: return
+            val key = keyFor(state) ?: return
+            if (key == thumbKey || key == thumbLoading) return
+            thumbLoading = key
             thumb = null
+            val youtubeId = idRegex.find(uri)?.groupValues?.get(1)
             thread(name = "cast-thumb") {
                 var bmp: Bitmap? = null
                 try {
-                    URL("https://i.ytimg.com/vi/$id/mqdefault.jpg").openStream().use {
-                        bmp = BitmapFactory.decodeStream(it)
+                    if (youtubeId != null) {
+                        URL("https://i.ytimg.com/vi/$youtubeId/mqdefault.jpg").openStream().use {
+                            bmp = BitmapFactory.decodeStream(it)
+                        }
+                    } else {
+                        bmp = MediaThumbs.load(app, uri)
                     }
                 } catch (e: Exception) {
-                    // no thumbnail, the notification still works
+                    // no picture, the notification still works
                 }
-                thumbId = id
-                thumbLoading = null
+                thumbKey = key
+                if (thumbLoading == key) thumbLoading = null
                 thumb = bmp
                 if (bmp != null && running) {
                     lastState?.let { s ->
-                        try {
-                            val nm = app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                            nm.notify(NOTIFICATION_ID, build(app, s))
-                        } catch (e: Exception) {
-                            // ignore
-                        }
+                        applySession(app, s)
+                        notifyNow(app, s)
                     }
                 }
             }
         }
 
+        // ---- media session -------------------------------------------------------
+
+        @Synchronized
+        private fun ensureSession(app: Context): MediaSession {
+            session?.let { return it }
+            val s = MediaSession(app, "TapnabCast")
+            s.setCallback(object : MediaSession.Callback() {
+                override fun onPlay() = DlnaCaster.control("resume")
+                override fun onPause() = DlnaCaster.control("pause")
+                override fun onSkipToNext() = DlnaCaster.control("next")
+                override fun onSkipToPrevious() = DlnaCaster.control("previous")
+                override fun onStop() = DlnaCaster.control("stop")
+                override fun onSeekTo(pos: Long) = DlnaCaster.control("seek", (pos / 1000).toInt())
+                override fun onCustomAction(action: String, extras: Bundle?) {
+                    if (action == "stop") DlnaCaster.control("stop")
+                }
+            }, Handler(Looper.getMainLooper()))
+            s.isActive = true
+            session = s
+            metaKey = null
+            return s
+        }
+
+        @Synchronized
+        private fun releaseSession() {
+            try {
+                session?.isActive = false
+                session?.release()
+            } catch (e: Exception) {
+                // already released
+            }
+            session = null
+            metaKey = null
+        }
+
+        @Synchronized
+        private fun applySession(app: Context, state: Map<String, Any?>) {
+            val s = ensureSession(app)
+            val status = state["status"] as? String ?: "loading"
+            val code = when (status) {
+                "playing" -> PlaybackState.STATE_PLAYING
+                "paused" -> PlaybackState.STATE_PAUSED
+                "loading", "connecting" -> PlaybackState.STATE_BUFFERING
+                else -> PlaybackState.STATE_STOPPED
+            }
+            val actions = PlaybackState.ACTION_PLAY or PlaybackState.ACTION_PAUSE or
+                PlaybackState.ACTION_PLAY_PAUSE or PlaybackState.ACTION_SKIP_TO_NEXT or
+                PlaybackState.ACTION_SKIP_TO_PREVIOUS or PlaybackState.ACTION_STOP or
+                PlaybackState.ACTION_SEEK_TO
+            s.setPlaybackState(
+                PlaybackState.Builder()
+                    .setActions(actions)
+                    .addCustomAction(
+                        PlaybackState.CustomAction.Builder("stop", "Stop", R.drawable.ic_stop).build(),
+                    )
+                    .setState(code, positionSec * 1000L, if (code == PlaybackState.STATE_PLAYING) 1f else 0f)
+                    .build(),
+            )
+            val device = state["device"] as? String ?: "TV"
+            val title = (state["title"] as? String)?.takeIf { it.isNotBlank() } ?: "Casting to $device"
+            val art = if (keyFor(state) == thumbKey) thumb else null
+            val key = "$title|$durationSec|${if (art != null) thumbKey else ""}"
+            if (key != metaKey) {
+                metaKey = key
+                val meta = MediaMetadata.Builder()
+                    .putString(MediaMetadata.METADATA_KEY_TITLE, title)
+                    .putString(MediaMetadata.METADATA_KEY_ARTIST, "Casting to $device")
+                    .putLong(MediaMetadata.METADATA_KEY_DURATION, durationSec * 1000L)
+                if (art != null) meta.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, art)
+                s.setMetadata(meta.build())
+            }
+        }
+
+        // ---- notification --------------------------------------------------------
+
         private fun action(context: Context, code: Int, act: String): PendingIntent =
             PendingIntent.getBroadcast(
                 context, code,
-                Intent(act).setPackage(context.packageName),
+                Intent(context, CastActionReceiver::class.java).setAction(act),
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
             )
 
@@ -141,11 +254,9 @@ class CastService : Service() {
                 Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
             )
-            val b = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                Notification.Builder(context, CHANNEL_ID)
-            } else {
-                Notification.Builder(context)
-            }
+            val b = Notification.Builder(context, CHANNEL_ID)
+            val style = Notification.MediaStyle().setShowActionsInCompactView(0, 1, 2)
+            session?.let { style.setMediaSession(it.sessionToken) }
             b.setSmallIcon(R.drawable.ic_stat_tapnab)
                 .setContentTitle(title)
                 .setContentText(if (status == "loading") "Starting on $device..." else "Casting to $device")
@@ -161,15 +272,12 @@ class CastService : Service() {
                 )
                 .addAction(button(context, R.drawable.ic_next, "Next", 3, ACTION_NEXT))
                 .addAction(button(context, R.drawable.ic_stop, "Stop", 4, ACTION_STOP))
-                .setStyle(Notification.MediaStyle().setShowActionsInCompactView(0, 1, 2))
-            val uri = state["pageUrl"] as? String ?: state["uri"] as? String
-            val id = uri?.let { idRegex.find(it)?.groupValues?.get(1) }
-            if (id != null && id == thumbId) thumb?.let { b.setLargeIcon(it) }
+                .setStyle(style)
+            if (keyFor(state) == thumbKey) thumb?.let { b.setLargeIcon(it) }
             return b.build()
         }
 
         private fun ensureChannel(context: Context) {
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
             val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             if (nm.getNotificationChannel(CHANNEL_ID) == null) {
                 nm.createNotificationChannel(

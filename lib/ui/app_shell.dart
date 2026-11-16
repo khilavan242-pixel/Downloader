@@ -5,8 +5,8 @@ import 'package:flutter/services.dart';
 
 import '../state/download_controller.dart';
 import 'browse_page.dart';
-import 'cast_bar.dart';
 import 'downloads_page.dart';
+import 'floating_player.dart';
 import 'home_page.dart';
 import 'settings_page.dart';
 
@@ -23,7 +23,8 @@ class AppShell extends StatefulWidget {
 class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   static const _home = 0, _browse = 1, _downloads = 2, _settings = 3;
 
-  int _index = 0;
+  // The app opens on YouTube, like the YouTube app.
+  int _index = _browse;
   StreamSubscription<String>? _msgSub;
   final _browseKey = GlobalKey<BrowsePageState>();
 
@@ -66,6 +67,12 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
   void _go(int i) => setState(() => _index = i);
 
+  /// Floating player tapped: show that video's page in the Browse tab.
+  void _openVideo(String id) {
+    c.openVideo.value = id;
+    _go(_browse);
+  }
+
   /// Back button: leave selection, go back in the browser, return to Home, then exit.
   Future<void> _onBack() async {
     if (c.selecting) {
@@ -73,8 +80,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       return;
     }
     if (_index == _browse && await (_browseKey.currentState?.goBack() ?? Future.value(false))) return;
-    if (_index != _home) {
-      _go(_home);
+    if (_index != _browse) {
+      _go(_browse);
       return;
     }
     await SystemNavigator.pop();
@@ -83,7 +90,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
-      listenable: c,
+      listenable: Listenable.merge([c, c.browseVideoId]),
       builder: (context, _) {
         final active = c.activeCount;
         return PopScope(
@@ -92,30 +99,45 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
             if (!didPop) unawaited(_onBack());
           },
           child: Scaffold(
-            body: IndexedStack(
-              index: _index,
+            body: Stack(
               children: [
-                HomePage(
-                  controller: c,
-                  onOpenDownloads: () => _go(_downloads),
-                  onOpenSettings: () => _go(_settings),
+                Positioned.fill(
+                  child: IndexedStack(
+                    index: _index,
+                    children: [
+                      HomePage(
+                        controller: c,
+                        onOpenDownloads: () => _go(_downloads),
+                        onOpenSettings: () => _go(_settings),
+                      ),
+                      BrowsePage(key: _browseKey, controller: c, active: _index == _browse, onNavigate: _go),
+                      DownloadsPage(controller: c),
+                      SettingsPage(controller: c),
+                    ],
+                  ),
                 ),
-                BrowsePage(key: _browseKey, controller: c, active: _index == _browse, onNavigate: _go),
-                DownloadsPage(controller: c),
-                SettingsPage(controller: c),
+                if (_floatingVisible())
+                  Positioned.fill(child: FloatingCast(controller: c, onOpenVideo: _openVideo)),
               ],
             ),
             // Browse is full screen, like the YouTube app: no Tapnab bar in the way.
             bottomNavigationBar: _index == _browse
                 ? null
-                : Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [CastBar(controller: c), _navBar(active)],
-                  ),
+                : _navBar(active),
           ),
         );
       },
     );
+  }
+
+  /// The floating window shows while the TV plays, except when the Browse tab
+  /// is already showing that very video (its controls are on the page then).
+  bool _floatingVisible() {
+    final s = c.cast;
+    if (!(s.active || s.status == 'connecting')) return false;
+    final shown = c.browseVideoId.value;
+    if (_index == _browse && shown != null && shown == c.castVideoId) return false;
+    return true;
   }
 
   Widget _navBar(int active) {
@@ -124,14 +146,14 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
               onDestinationSelected: _go,
               destinations: [
                 const NavigationDestination(
-                  icon: Icon(Icons.home_outlined),
-                  selectedIcon: Icon(Icons.home_rounded),
-                  label: 'Home',
+                  icon: Icon(Icons.link_rounded),
+                  selectedIcon: Icon(Icons.link_rounded),
+                  label: 'Link',
                 ),
                 const NavigationDestination(
                   icon: Icon(Icons.travel_explore_outlined),
                   selectedIcon: Icon(Icons.travel_explore_rounded),
-                  label: 'Browse',
+                  label: 'YouTube',
                 ),
                 NavigationDestination(
                   icon: Badge(

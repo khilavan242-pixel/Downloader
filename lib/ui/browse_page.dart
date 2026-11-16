@@ -19,6 +19,50 @@ const _watcher = r'''
   if (typeof window.__tapnabOn === 'undefined') window.__tapnabOn = false;
   var last = '';
   var wasOn = false;
+  var lastRel = '';
+  var lastY = {};
+  var lastDir = 0;
+  var lastHref = location.href;
+  window.addEventListener('scroll', function(e){
+    try {
+      if (location.href !== lastHref) { lastHref = location.href; lastDir = 0; }
+      var t = e.target;
+      var isDoc = (t === document || t === document.documentElement || t === document.body);
+      var y = isDoc ? (window.scrollY || 0) : (t.scrollTop || 0);
+      var k = isDoc ? 'doc' : (t.tagName || 'x');
+      var prev = lastY[k];
+      lastY[k] = y;
+      if (prev === undefined) return;
+      var d = y - prev;
+      if (Math.abs(d) < 6) return;
+      var dir = d > 0 ? 1 : -1;
+      if (dir !== lastDir) { lastDir = dir; Tapnab.postMessage(JSON.stringify({t: 'scroll', d: dir})); }
+    } catch (x) {}
+  }, {passive: true, capture: true});
+  setInterval(function(){
+    try {
+      if (!window.__tapnabStyled && document.querySelector('ytm-pivot-bar-renderer')) {
+        var st = document.createElement('style');
+        st.textContent = 'ytm-pivot-bar-renderer{display:none!important}';
+        document.head.appendChild(st);
+        window.__tapnabStyled = true;
+        Tapnab.postMessage(JSON.stringify({t: 'pivot'}));
+      }
+      if (location.pathname !== '/watch') return;
+      var m = /[?&]v=([A-Za-z0-9_-]{11})/.exec(location.search);
+      if (!m) return;
+      var seen = {}, ids = [];
+      var as = document.querySelectorAll('a[href*="/watch?v="]');
+      for (var i = 0; i < as.length && ids.length < 30; i++) {
+        var mm = /[?&]v=([A-Za-z0-9_-]{11})/.exec(as[i].getAttribute('href') || '');
+        if (!mm || mm[1] === m[1] || seen[mm[1]]) continue;
+        seen[mm[1]] = 1;
+        ids.push(mm[1]);
+      }
+      var msg = JSON.stringify({t: 'related', id: m[1], ids: ids});
+      if (ids.length && msg !== lastRel) { lastRel = msg; Tapnab.postMessage(msg); }
+    } catch (x) {}
+  }, 2500);
   setInterval(function(){
     try {
       var vs = document.getElementsByTagName('video');
@@ -73,6 +117,8 @@ class BrowsePageState extends State<BrowsePage> {
   Rect? _videoRect; // in page (CSS) pixels
   double _pageWidth = 0;
   bool _flag = false;
+  bool _pivotHidden = false; // YouTube's own bottom bar is hidden, ours is shown
+  bool _barVisible = true;
 
   DownloadController get c => widget.controller;
 
@@ -81,6 +127,7 @@ class BrowsePageState extends State<BrowsePage> {
     super.initState();
     c.addListener(_syncFlag);
     c.castAdvanced.addListener(_onTvAdvanced);
+    c.openVideo.addListener(_onOpenVideo);
     if (widget.active) _start();
   }
 
@@ -88,6 +135,7 @@ class BrowsePageState extends State<BrowsePage> {
   void dispose() {
     c.removeListener(_syncFlag);
     c.castAdvanced.removeListener(_onTvAdvanced);
+    c.openVideo.removeListener(_onOpenVideo);
     super.dispose();
   }
 
@@ -119,6 +167,7 @@ class BrowsePageState extends State<BrowsePage> {
           },
           onPageFinished: (u) {
             if (!mounted) return;
+            c.browseVideoId.value = UrlUtils.videoId(u);
             setState(() {
               _url = u;
               _progress = 100;
@@ -127,8 +176,26 @@ class BrowsePageState extends State<BrowsePage> {
           },
         ),
       )
-      ..loadRequest(Uri.parse(_home));
+      ..loadRequest(Uri.parse(_startUrl()));
     setState(() => _web = controller);
+  }
+
+  String _startUrl() {
+    final id = c.openVideo.value;
+    if (id == null) return _home;
+    c.openVideo.value = null;
+    return 'https://m.youtube.com/watch?v=$id';
+  }
+
+  /// The floating player asked to show a video's page.
+  void _onOpenVideo() {
+    final id = c.openVideo.value;
+    final w = _web;
+    if (id == null || w == null) return;
+    c.openVideo.value = null;
+    if (UrlUtils.videoId(_url) != id) {
+      w.loadRequest(Uri.parse('https://m.youtube.com/watch?v=$id'));
+    }
   }
 
   Future<void> _install() async {
@@ -152,28 +219,43 @@ class BrowsePageState extends State<BrowsePage> {
   void _onPageMessage(JavaScriptMessage m) {
     try {
       final j = jsonDecode(m.message) as Map<String, dynamic>;
-      final r = j['r'] as Map<String, dynamic>?;
-      final iw = (j['iw'] as num?)?.toDouble() ?? 0;
-      final rect = r == null
-          ? null
-          : Rect.fromLTWH(
-              (r['x'] as num).toDouble(),
-              (r['y'] as num).toDouble(),
-              (r['w'] as num).toDouble(),
-              (r['h'] as num).toDouble(),
-            );
-      if (!mounted) return;
-      setState(() {
-        _videoRect = rect;
-        _pageWidth = iw;
-      });
+      switch (j['t']) {
+        case 'pivot':
+          if (mounted) setState(() => _pivotHidden = true);
+        case 'scroll':
+          final down = (j['d'] as num?) == 1;
+          if (mounted && _barVisible == down) setState(() => _barVisible = !down);
+        case 'related':
+          final ids = (j['ids'] as List<dynamic>).whereType<String>().toList();
+          c.offerRelated(j['id'] as String, ids);
+        case 'rect':
+          final r = j['r'] as Map<String, dynamic>?;
+          final iw = (j['iw'] as num?)?.toDouble() ?? 0;
+          final rect = r == null
+              ? null
+              : Rect.fromLTWH(
+                  (r['x'] as num).toDouble(),
+                  (r['y'] as num).toDouble(),
+                  (r['w'] as num).toDouble(),
+                  (r['h'] as num).toDouble(),
+                );
+          if (!mounted) return;
+          setState(() {
+            _videoRect = rect;
+            _pageWidth = iw;
+          });
+      }
     } catch (_) {}
   }
 
   /// The page moved to [u]. With a TV connected, a video page starts on the TV.
   void _onUrl(String u) {
     final before = UrlUtils.videoId(_url);
-    setState(() => _url = u);
+    c.browseVideoId.value = UrlUtils.videoId(u);
+    setState(() {
+      _url = u;
+      _barVisible = true;
+    });
     final now = UrlUtils.videoId(u);
     if (c.castTarget != null && now != null && now != before) {
       c.castPlayNow(u, listUrl: _listUrl(u));
@@ -244,7 +326,8 @@ class BrowsePageState extends State<BrowsePage> {
             final pageId = UrlUtils.videoId(_url);
             final onWatch = pageId != null;
             final showPanel = connected && onWatch;
-            final showMini = connected && !onWatch && (c.cast.active || c.cast.status == 'connecting');
+            final showBar = _pivotHidden && !onWatch;
+            final clusterBottom = !_pivotHidden ? 128.0 : (showBar && _barVisible ? 64.0 : 16.0);
             final canDownload = UrlUtils.isDownloadablePage(_url);
 
             Rect panel = Rect.fromLTWH(0, 0, box.maxWidth, box.maxWidth * 9 / 16);
@@ -276,22 +359,21 @@ class BrowsePageState extends State<BrowsePage> {
                       onChangeDevice: _changeDevice,
                     ),
                   ),
-                if (showMini)
+                if (showBar)
                   Positioned(
-                    left: 8,
-                    right: 8,
-                    bottom: 124,
-                    child: TvMiniPlayer(
-                      controller: c,
-                      onOpen: () {
-                        final id = c.castVideoId;
-                        if (id != null) w.loadRequest(Uri.parse('https://m.youtube.com/watch?v=$id'));
-                      },
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    child: AnimatedSlide(
+                      offset: _barVisible ? Offset.zero : const Offset(0, 1),
+                      duration: const Duration(milliseconds: 200),
+                      child: _bottomBar(context, w),
                     ),
                   ),
-                Positioned(
+                AnimatedPositioned(
+                  duration: const Duration(milliseconds: 200),
                   right: 8,
-                  bottom: showMini ? 196 : 128,
+                  bottom: clusterBottom,
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -312,6 +394,54 @@ class BrowsePageState extends State<BrowsePage> {
               ],
             );
           },
+        ),
+      ),
+    );
+  }
+
+  Widget _bottomBar(BuildContext context, WebViewController w) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final path = Uri.tryParse(_url)?.path ?? '/';
+    final onHome = path == '/' || path.isEmpty;
+    final onShorts = path.startsWith('/shorts');
+    final onYou = path.startsWith('/feed/you') || path.startsWith('/feed/library');
+    final fg = dark ? Colors.white : Colors.black;
+    Widget item(IconData icon, String label, bool on, String target) {
+      return Expanded(
+        child: InkWell(
+          onTap: () {
+            setState(() => _barVisible = true);
+            w.loadRequest(Uri.parse('https://m.youtube.com$target'));
+          },
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon, color: fg.withValues(alpha: on ? 1 : 0.7), size: 24),
+              const SizedBox(height: 2),
+              Text(
+                label,
+                style: TextStyle(
+                  color: fg.withValues(alpha: on ? 1 : 0.7),
+                  fontSize: 11,
+                  fontWeight: on ? FontWeight.w700 : FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Material(
+      color: dark ? const Color(0xFF0F0F0F) : Colors.white,
+      child: SizedBox(
+        height: 52,
+        child: Row(
+          children: [
+            item(onHome ? Icons.home_rounded : Icons.home_outlined, 'Home', onHome, '/'),
+            item(Icons.slow_motion_video_rounded, 'Shorts', onShorts, '/shorts'),
+            item(onYou ? Icons.account_circle : Icons.account_circle_outlined, 'You', onYou, '/feed/you'),
+          ],
         ),
       ),
     );

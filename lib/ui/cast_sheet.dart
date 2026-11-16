@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/cast.dart';
 import '../models/download_task.dart';
 import '../state/download_controller.dart';
+import 'floating_player.dart';
 
 /// Lets the user choose a TV / set-top box, then plays [tasks] (saved files) on it.
 Future<void> castDownloads(BuildContext context, DownloadController c, List<DownloadTask> tasks) async {
@@ -135,4 +136,5 @@ Future<void> castLocalFiles(BuildContext context, DownloadController c) async {
   final device = c.castTarget ?? await pickCastDevice(context, c);
   if (device == null) return;
   await c.castMedia(device, items);
+  if (context.mounted) await showNowPlaying(context, c);
 }

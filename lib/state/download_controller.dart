@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -63,6 +64,12 @@ class DownloadController extends ChangeNotifier {
   String? _extendedFor;
   int _queueSeq = 0;
   final Set<String> _playedIds = {};
+  final Map<String, List<PlaylistEntry>> _pageRelated = {};
+  final Map<String, Future<Uint8List?>> _thumbs = {};
+  bool _userStopped = false;
+  bool _queueing = false;
+  bool _continuing = false;
+  bool _wasActive = false;
   SortMode _sort = SortMode.newest;
   MediaKind? _kindFilter;
 
@@ -80,6 +87,22 @@ class DownloadController extends ChangeNotifier {
 
   /// Set to a video id when the TV moved on to the next video by itself.
   final ValueNotifier<String?> castAdvanced = ValueNotifier<String?>(null);
+
+  /// The video id of the YouTube watch page open in the Browse tab (or null).
+  final ValueNotifier<String?> browseVideoId = ValueNotifier<String?>(null);
+
+  /// Set by the floating player to ask Browse to show this video's page.
+  final ValueNotifier<String?> openVideo = ValueNotifier<String?>(null);
+
+  /// Picture for a file on the phone, cached.
+  Future<Uint8List?> thumbFor(String uri) => _thumbs.putIfAbsent(uri, () => _bridge.mediaThumb(uri));
+
+  /// "Up next" videos found on the open YouTube page (used when the Mix list is not available).
+  void offerRelated(String id, List<String> ids) {
+    _pageRelated[id] = [
+      for (final e in ids) PlaylistEntry(url: 'https://www.youtube.com/watch?v=$e', title: ''),
+    ];
+  }
 
   MediaKind get kind => _kind;
   QualityOption get quality => _quality;
@@ -533,6 +556,7 @@ class DownloadController extends ChangeNotifier {
       return;
     }
     _target = device;
+    _userStopped = false;
     _settings.castDevice = jsonEncode(device.toMap());
     _cast = CastState(
       status: 'connecting',
@@ -594,59 +618,107 @@ class DownloadController extends ChangeNotifier {
 
   /// Plays one YouTube video on the connected TV and queues "up next" videos
   /// behind it, like the YouTube app does.
-  Future<void> castPlayNow(String url, {String? listUrl}) async {
+  Future<void> castPlayNow(String url, {String? listUrl, bool keepHistory = false}) async {
     final target = _target;
     final id = UrlUtils.videoId(url);
     if (target == null || id == null) return;
     if (id == _castVideoId && (_cast.active || _cast.status == 'connecting')) return;
     final seq = ++_queueSeq;
-    _playedIds
-      ..clear()
-      ..add(id);
-    _extendedFor = id;
+    if (!keepHistory) _playedIds.clear();
+    _playedIds.add(id);
+    _extendedFor = null;
     await _startCast(
       target,
       [CastItem(uri: 'https://www.youtube.com/watch?v=$id', title: 'YouTube video', mime: 'video/mp4', stream: true)],
     );
     if (seq != _queueSeq) return;
-    unawaited(_queueMore(id, listUrl, seq));
+    var added = await _queueMore(id, listUrl, seq);
+    // The page may not have listed its "up next" videos yet: try again shortly.
+    for (var attempt = 0; attempt < 2 && added == 0 && seq == _queueSeq && _target != null; attempt++) {
+      await Future<void>.delayed(const Duration(seconds: 3));
+      if (seq != _queueSeq) return;
+      added = await _queueMore(id, null, seq);
+    }
   }
 
-  /// Adds the videos that follow [id] (from its playlist or its Mix) to the TV queue.
-  Future<void> _queueMore(String id, String? listUrl, int seq) async {
+  /// Related videos for [id]: the playlist / Mix, or what the open page lists as "up next".
+  Future<List<PlaylistEntry>> _related(String id, String? listUrl) async {
     final source = listUrl ?? 'https://www.youtube.com/watch?v=$id&list=RD$id';
-    List<PlaylistEntry> entries;
     try {
-      entries = await _bridge.fetchPlaylist(source);
-    } catch (_) {
-      return;
-    }
-    if (seq != _queueSeq || _target == null) return;
-    final at = entries.indexWhere((e) => UrlUtils.videoId(e.url) == id);
-    final after = at >= 0 ? entries.sublist(at + 1) : entries;
-    final items = <CastItem>[];
-    for (final e in after) {
-      final eid = UrlUtils.videoId(e.url);
-      if (eid == null || _playedIds.contains(eid)) continue;
-      _playedIds.add(eid);
-      items.add(CastItem(
-        uri: 'https://www.youtube.com/watch?v=$eid',
-        title: e.displayTitle,
-        mime: 'video/mp4',
-        stream: true,
-      ));
-      if (items.length >= 50) break;
-    }
-    if (items.isEmpty) return;
+      final entries = await _bridge.fetchPlaylist(source);
+      if (entries.isNotEmpty) return entries;
+    } catch (_) {/* fall back to the page */}
+    return _pageRelated[id] ?? const [];
+  }
+
+  /// Adds the videos that follow [id] to the TV queue. Returns how many were added.
+  Future<int> _queueMore(String id, String? listUrl, int seq) async {
+    if (_queueing) return 0;
+    _queueing = true;
     try {
-      await _bridge.castAppend(items);
-    } catch (_) {/* the queue simply stays as it is */}
+      final entries = await _related(id, listUrl);
+      if (seq != _queueSeq || _target == null) return 0;
+      final at = entries.indexWhere((e) => UrlUtils.videoId(e.url) == id);
+      final after = at >= 0 ? entries.sublist(at + 1) : entries;
+      final items = <CastItem>[];
+      for (final e in after) {
+        final eid = UrlUtils.videoId(e.url);
+        if (eid == null || _playedIds.contains(eid)) continue;
+        _playedIds.add(eid);
+        items.add(CastItem(
+          uri: 'https://www.youtube.com/watch?v=$eid',
+          title: e.displayTitle,
+          mime: 'video/mp4',
+          stream: true,
+        ));
+        if (items.length >= 50) break;
+      }
+      if (items.isEmpty) return 0;
+      try {
+        await _bridge.castAppend(items);
+      } catch (_) {
+        return 0;
+      }
+      return items.length;
+    } finally {
+      _queueing = false;
+    }
+  }
+
+  /// The queue ran out (the TV stopped by itself): start the next related video.
+  Future<void> _continueAfterEnd(String id) async {
+    if (_continuing) return;
+    _continuing = true;
+    try {
+      final seq = _queueSeq;
+      final entries = await _related(id, null);
+      if (seq != _queueSeq || _target == null || _userStopped) return;
+      for (final e in entries) {
+        final eid = UrlUtils.videoId(e.url);
+        if (eid == null || _playedIds.contains(eid)) continue;
+        castAdvanced.value = eid;
+        await castPlayNow('https://www.youtube.com/watch?v=$eid', keepHistory: true);
+        return;
+      }
+    } finally {
+      _continuing = false;
+    }
   }
 
   /// Runs on every state change from the TV session.
   void _onCastChanged(CastState s) {
+    if (s.status == 'ended' && _wasActive && !_userStopped && _target != null && _castVideoId != null) {
+      _wasActive = false;
+      unawaited(_continueAfterEnd(_castVideoId!));
+      return;
+    }
+    if (!s.active) {
+      if (s.status == 'stopped' || s.status == 'ended' || s.status == 'error' || s.status == 'idle') _wasActive = false;
+      return;
+    }
+    _wasActive = true;
     final id = s.uri == null ? null : UrlUtils.videoId(s.uri!);
-    if (id == null || !s.active) return;
+    if (id == null) return;
     if (id != _castVideoId) {
       // The TV moved on by itself (next in the queue).
       _castVideoId = id;
@@ -654,7 +726,7 @@ class DownloadController extends ChangeNotifier {
       castAdvanced.value = id;
     }
     // Reached the end of the queue: ask for more related videos (once per video).
-    if (s.status == 'playing' && s.count > 0 && s.index >= s.count - 1 && _extendedFor != id) {
+    if (s.status == 'playing' && s.count > 0 && s.index >= s.count - 1 && _extendedFor != id && !_queueing) {
       _extendedFor = id;
       unawaited(_queueMore(id, null, _queueSeq));
     }
@@ -676,6 +748,7 @@ class DownloadController extends ChangeNotifier {
 
   /// `pause`, `resume`, `next`, `previous` or `stop`.
   Future<void> castControl(String action) async {
+    if (action == 'stop') _userStopped = true;
     try {
       await _bridge.castControl(action);
     } catch (_) {/* the TV state event will tell the story */}
@@ -923,6 +996,8 @@ class DownloadController extends ChangeNotifier {
     incoming.dispose();
     castProgress.dispose();
     castAdvanced.dispose();
+    browseVideoId.dispose();
+    openVideo.dispose();
     super.dispose();
   }
 }

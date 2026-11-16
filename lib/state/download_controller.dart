@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -38,6 +39,7 @@ class DownloadController extends ChangeNotifier {
     _kind = settings.kind;
     _quality = settings.qualityFor(_kind);
     _playlist = settings.playlist;
+    _target = _loadTarget(settings.castDevice);
   }
 
   final NativeBridge _bridge;
@@ -56,6 +58,11 @@ class DownloadController extends ChangeNotifier {
   final Set<String> _selected = {};
   int _idCounter = 0;
   CastState _cast = const CastState.idle();
+  CastDevice? _target;
+  String? _castVideoId;
+  String? _extendedFor;
+  int _queueSeq = 0;
+  final Set<String> _playedIds = {};
   SortMode _sort = SortMode.newest;
   MediaKind? _kindFilter;
 
@@ -67,6 +74,13 @@ class DownloadController extends ChangeNotifier {
   /// page picks it up, fills the link box and clears it.
   final ValueNotifier<String?> incoming = ValueNotifier<String?>(null);
 
+  /// Playback position on the TV (updates a few times per second, so it is
+  /// a notifier and does not rebuild the whole app).
+  final ValueNotifier<CastProgress> castProgress = ValueNotifier<CastProgress>(const CastProgress());
+
+  /// Set to a video id when the TV moved on to the next video by itself.
+  final ValueNotifier<String?> castAdvanced = ValueNotifier<String?>(null);
+
   MediaKind get kind => _kind;
   QualityOption get quality => _quality;
   bool get playlist => _playlist;
@@ -75,6 +89,12 @@ class DownloadController extends ChangeNotifier {
   List<QualityOption> get qualityOptions => QualityOption.forKind(_kind);
   SettingsStore get settings => _settings;
   CastState get cast => _cast;
+
+  /// The TV Tapnab is connected to. It stays until the user disconnects.
+  CastDevice? get castTarget => _target;
+
+  /// YouTube id of the video the TV is playing (or was last told to play).
+  String? get castVideoId => _castVideoId;
   ThemeMode get themeMode => _settings.themeMode;
 
   // ---- sort and filter -----------------------------------------------------------
@@ -462,6 +482,7 @@ class DownloadController extends ChangeNotifier {
 
   /// Plays finished downloads on the TV, oldest first, one after another.
   Future<void> castTasks(CastDevice device, List<DownloadTask> tasks) async {
+    _queueSeq++;
     final items = tasks
         .where((t) => t.status == TaskStatus.completed && t.fileUri != null && !_missing.contains(t.id))
         .toList()
@@ -479,6 +500,7 @@ class DownloadController extends ChangeNotifier {
   /// Plays YouTube links on the TV straight from YouTube (nothing is downloaded).
   /// A playlist page is expanded into all of its videos.
   Future<void> castLinks(CastDevice device, List<String> urls, {bool audioOnly = false}) async {
+    _queueSeq++;
     final mime = audioOnly ? 'audio/mp4' : 'video/mp4';
     _cast = CastState(status: 'connecting', device: device.name);
     notifyListeners();
@@ -503,26 +525,153 @@ class DownloadController extends ChangeNotifier {
     await _startCast(device, items);
   }
 
-  Future<void> _startCast(CastDevice device, List<CastItem> items) async {
+  Future<void> _startCast(CastDevice device, List<CastItem> items, {bool retry = true}) async {
     if (items.isEmpty) {
       _cast = const CastState.idle();
       notifyListeners();
       _say('Nothing to play');
       return;
     }
-    _cast = CastState(status: 'connecting', device: device.name, count: items.length, title: items.first.title);
+    _target = device;
+    _settings.castDevice = jsonEncode(device.toMap());
+    _cast = CastState(
+      status: 'connecting',
+      device: device.name,
+      count: items.length,
+      title: items.first.title,
+      uri: items.first.uri,
+    );
+    final firstId = UrlUtils.videoId(items.first.uri);
+    _castVideoId = firstId;
+    if (firstId != null) _playedIds.add(firstId);
     notifyListeners();
     try {
       await _bridge.castPlay(device, items);
-    } on PlatformException catch (e) {
+    } catch (e) {
+      // The TV may have a new address (router gave it another IP). Look for it
+      // by name once and try again.
+      if (retry) {
+        try {
+          final found = await _bridge.castDiscover();
+          final match = found.where((d) => d.name == device.name);
+          if (match.isNotEmpty) {
+            await _startCast(match.first, items, retry: false);
+            return;
+          }
+        } catch (_) {/* fall through to the message */}
+      }
       _cast = const CastState.idle();
       notifyListeners();
-      _say(e.message ?? 'Could not reach the TV');
-    } catch (_) {
-      _cast = const CastState.idle();
-      notifyListeners();
-      _say('Could not reach the TV');
+      _say(e is PlatformException ? (e.message ?? 'Could not reach the TV') : 'Could not reach the TV');
     }
+  }
+
+  CastDevice? _loadTarget(String? json) {
+    if (json == null) return null;
+    try {
+      return CastDevice.fromMap(jsonDecode(json) as Map<dynamic, dynamic>);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Remembers [device] as the TV to play on, until [disconnectCast].
+  void connectCast(CastDevice device) {
+    _target = device;
+    _settings.castDevice = jsonEncode(device.toMap());
+    notifyListeners();
+  }
+
+  /// Forgets the TV and stops what it is playing. Only the user does this.
+  Future<void> disconnectCast() async {
+    _target = null;
+    _settings.castDevice = null;
+    _castVideoId = null;
+    _queueSeq++;
+    notifyListeners();
+    await castControl('stop');
+  }
+
+  /// Plays one YouTube video on the connected TV and queues "up next" videos
+  /// behind it, like the YouTube app does.
+  Future<void> castPlayNow(String url, {String? listUrl}) async {
+    final target = _target;
+    final id = UrlUtils.videoId(url);
+    if (target == null || id == null) return;
+    if (id == _castVideoId && (_cast.active || _cast.status == 'connecting')) return;
+    final seq = ++_queueSeq;
+    _playedIds
+      ..clear()
+      ..add(id);
+    _extendedFor = id;
+    await _startCast(
+      target,
+      [CastItem(uri: 'https://www.youtube.com/watch?v=$id', title: 'YouTube video', mime: 'video/mp4', stream: true)],
+    );
+    if (seq != _queueSeq) return;
+    unawaited(_queueMore(id, listUrl, seq));
+  }
+
+  /// Adds the videos that follow [id] (from its playlist or its Mix) to the TV queue.
+  Future<void> _queueMore(String id, String? listUrl, int seq) async {
+    final source = listUrl ?? 'https://www.youtube.com/watch?v=$id&list=RD$id';
+    List<PlaylistEntry> entries;
+    try {
+      entries = await _bridge.fetchPlaylist(source);
+    } catch (_) {
+      return;
+    }
+    if (seq != _queueSeq || _target == null) return;
+    final at = entries.indexWhere((e) => UrlUtils.videoId(e.url) == id);
+    final after = at >= 0 ? entries.sublist(at + 1) : entries;
+    final items = <CastItem>[];
+    for (final e in after) {
+      final eid = UrlUtils.videoId(e.url);
+      if (eid == null || _playedIds.contains(eid)) continue;
+      _playedIds.add(eid);
+      items.add(CastItem(
+        uri: 'https://www.youtube.com/watch?v=$eid',
+        title: e.displayTitle,
+        mime: 'video/mp4',
+        stream: true,
+      ));
+      if (items.length >= 50) break;
+    }
+    if (items.isEmpty) return;
+    try {
+      await _bridge.castAppend(items);
+    } catch (_) {/* the queue simply stays as it is */}
+  }
+
+  /// Runs on every state change from the TV session.
+  void _onCastChanged(CastState s) {
+    final id = s.uri == null ? null : UrlUtils.videoId(s.uri!);
+    if (id == null || !s.active) return;
+    if (id != _castVideoId) {
+      // The TV moved on by itself (next in the queue).
+      _castVideoId = id;
+      _playedIds.add(id);
+      castAdvanced.value = id;
+    }
+    // Reached the end of the queue: ask for more related videos (once per video).
+    if (s.status == 'playing' && s.count > 0 && s.index >= s.count - 1 && _extendedFor != id) {
+      _extendedFor = id;
+      unawaited(_queueMore(id, null, _queueSeq));
+    }
+  }
+
+  /// Plays audio / video files from the phone on the connected TV.
+  Future<List<CastItem>> pickLocalMedia() => _bridge.pickMedia();
+
+  Future<void> castMedia(CastDevice device, List<CastItem> items) async {
+    _queueSeq++;
+    await _startCast(device, items);
+  }
+
+  Future<void> castSeek(int seconds) async {
+    try {
+      await _bridge.castControl('seek', value: seconds);
+    } catch (_) {}
   }
 
   /// `pause`, `resume`, `next`, `previous` or `stop`.
@@ -728,9 +877,17 @@ class DownloadController extends ChangeNotifier {
       notifyListeners();
       return;
     }
+    if (e['type'] == 'castPos') {
+      castProgress.value = CastProgress(
+        position: (e['position'] as num?)?.toInt() ?? 0,
+        duration: (e['duration'] as num?)?.toInt() ?? 0,
+      );
+      return;
+    }
     if (e['type'] == 'cast') {
       _cast = CastState.fromMap(e);
       if (_cast.status == 'error' && _cast.error != null) _say(_cast.error!);
+      _onCastChanged(_cast);
       notifyListeners();
       return;
     }
@@ -764,6 +921,8 @@ class DownloadController extends ChangeNotifier {
     _saveTimer?.cancel();
     _messages.close();
     incoming.dispose();
+    castProgress.dispose();
+    castAdvanced.dispose();
     super.dispose();
   }
 }

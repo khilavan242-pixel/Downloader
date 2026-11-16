@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'dart:typed_data';
+
 import 'package:flutter/services.dart';
 
 import '../models/cast.dart';
@@ -142,6 +144,9 @@ class NativeBridge {
   /// Adds more items to the end of the running TV queue.
   Future<void> castAppend(List<CastItem> items) =>
       _methods.invokeMethod<void>('castAppend', {'items': items.map((i) => i.toMap()).toList()});
+
+  /// Picture for a file on the phone (album art, thumbnail or a video frame), or null.
+  Future<Uint8List?> mediaThumb(String uri) => _methods.invokeMethod<Uint8List>('mediaThumb', {'uri': uri});
 
   /// Lets the user pick audio / video files from the phone. Empty when cancelled.
   Future<List<CastItem>> pickMedia() async {

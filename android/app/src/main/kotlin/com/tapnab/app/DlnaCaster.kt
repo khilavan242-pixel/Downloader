@@ -22,6 +22,7 @@ import java.net.SocketTimeoutException
 import java.net.URL
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 import kotlin.concurrent.thread
 
@@ -42,9 +43,18 @@ object DlnaCaster {
 
     private const val TAG = "DlnaCaster"
 
-    class Device(val name: String, val controlUrl: String, val serviceType: String) {
-        fun toMap(): Map<String, Any?> =
-            mapOf("name" to name, "controlUrl" to controlUrl, "serviceType" to serviceType)
+    class Device(
+        val name: String,
+        val controlUrl: String,
+        val serviceType: String,
+        /** RenderingControl (volume) service, when the device has one. */
+        val renderUrl: String? = null,
+        val renderType: String? = null,
+    ) {
+        fun toMap(): Map<String, Any?> = mapOf(
+            "name" to name, "controlUrl" to controlUrl, "serviceType" to serviceType,
+            "renderUrl" to renderUrl, "renderType" to renderType,
+        )
     }
 
     /**
@@ -116,17 +126,27 @@ object DlnaCaster {
         val app = context.applicationContext
         val ip = localIpFor(device.controlUrl)
         val server = MediaServer(app.contentResolver)
-        val s = Session(app, device, items, server, ip)
+        val s = Session(app, device, CopyOnWriteArrayList(items), server, ip)
         session = s
         CastService.start(app, device.name)
         thread(name = "dlna-session") { s.run() }
     }
 
-    /** pause | resume | next | previous | stop */
-    fun control(action: String) {
+    /** pause | resume | next | previous | stop | seek (value = seconds) | volume (value = 0..100) | volumeUp | volumeDown */
+    fun control(action: String, value: Int = 0) {
         val s = session ?: return
-        thread(name = "dlna-control") { s.control(action) }
+        thread(name = "dlna-control") { s.control(action, value) }
     }
+
+    /** Adds more items to the end of the running queue (used for "up next"). */
+    fun append(items: List<Item>) {
+        val s = session ?: return
+        s.items.addAll(items)
+        s.publishCurrent()
+    }
+
+    /** True while casting to a device whose volume can be set (used for the phone's volume keys). */
+    fun canControlVolume(): Boolean = session?.device?.renderUrl != null
 
     fun state(): Map<String, Any?> = session?.toMap() ?: mapOf("type" to "cast", "status" to "idle")
 
@@ -179,16 +199,26 @@ object DlnaCaster {
             val name = Regex("<friendlyName>(.*?)</friendlyName>", RegexOption.DOT_MATCHES_ALL)
                 .find(xml)?.groupValues?.get(1)?.trim()?.let(::unesc) ?: "TV"
             val base = Regex("<URLBase>(.*?)</URLBase>").find(xml)?.groupValues?.get(1)?.trim()
+            var avUrl: String? = null
+            var avType: String? = null
+            var rcUrl: String? = null
+            var rcType: String? = null
+            val origin = if (base.isNullOrEmpty()) location else base
             for (m in Regex("<service>(.*?)</service>", RegexOption.DOT_MATCHES_ALL).findAll(xml)) {
                 val block = m.groupValues[1]
                 val type = Regex("<serviceType>(.*?)</serviceType>").find(block)?.groupValues?.get(1)?.trim()
-                    ?: continue
-                if (!type.contains("AVTransport")) continue
                 val control = Regex("<controlURL>(.*?)</controlURL>").find(block)?.groupValues?.get(1)?.trim()
-                    ?: continue
-                val absolute = URL(URL(if (base.isNullOrEmpty()) location else base), control).toString()
-                return Device(name, absolute, type)
+                if (type == null || control == null) continue
+                val absolute = URL(URL(origin), control).toString()
+                if (type.contains("AVTransport") && avUrl == null) {
+                    avUrl = absolute
+                    avType = type
+                } else if (type.contains("RenderingControl") && rcUrl == null) {
+                    rcUrl = absolute
+                    rcType = type
+                }
             }
+            if (avUrl != null && avType != null) return Device(name, avUrl, avType, rcUrl, rcType)
         } catch (e: Exception) {
             Log.w(TAG, "could not read device description at $location", e)
         }
@@ -279,6 +309,40 @@ object DlnaCaster {
             readLine(input) // CRLF after each chunk
         }
         return out.toByteArray()
+    }
+
+    private fun soapAt(url: String, type: String, action: String, args: String): String {
+        val body = "<?xml version=\"1.0\" encoding=\"utf-8\"?>" +
+            "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" " +
+            "s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body>" +
+            "<u:$action xmlns:u=\"$type\">$args</u:$action>" +
+            "</s:Body></s:Envelope>"
+        val res = request(
+            "POST", url,
+            mapOf(
+                "Content-Type" to "text/xml; charset=\"utf-8\"",
+                "SOAPACTION" to "\"$type#$action\"",
+            ),
+            body,
+        )
+        if (res.status !in 200..299) throw IOException("The TV refused \"$action\" (HTTP ${res.status})")
+        return res.body
+    }
+
+    /** "0:03:45" -> 225; -1 when unknown. */
+    private fun parseClock(text: String?): Int {
+        if (text == null) return -1
+        val parts = text.trim().substringBefore('.').split(':')
+        if (parts.size != 3) return -1
+        val h = parts[0].toIntOrNull() ?: return -1
+        val m = parts[1].toIntOrNull() ?: return -1
+        val sec = parts[2].toIntOrNull() ?: return -1
+        return h * 3600 + m * 60 + sec
+    }
+
+    private fun clock(totalSeconds: Int): String {
+        val t = maxOf(totalSeconds, 0)
+        return String.format("%d:%02d:%02d", t / 3600, (t / 60) % 60, t % 60)
     }
 
     // ---- XML helpers --------------------------------------------------------------
@@ -461,7 +525,7 @@ object DlnaCaster {
     private class Session(
         val app: Context,
         val device: Device,
-        val items: List<Item>,
+        val items: CopyOnWriteArrayList<Item>,
         val server: MediaServer,
         val ip: String,
     ) {
@@ -469,6 +533,9 @@ object DlnaCaster {
         @Volatile var index = 0
         @Volatile var status = "connecting"
         @Volatile var error: String? = null
+        @Volatile var volume = -1
+        @Volatile private var lastPosition = -1
+        @Volatile private var lastDuration = -1
         private val liveTitles = ConcurrentHashMap<Int, String>()
 
         @Volatile private var jumpTo = -1
@@ -479,32 +546,60 @@ object DlnaCaster {
             "status" to status,
             "device" to device.name,
             "title" to (liveTitles[index]?.takeIf { it.isNotBlank() } ?: items.getOrNull(index)?.title),
+            "uri" to items.getOrNull(index)?.uri,
+            "stream" to (items.getOrNull(index)?.stream ?: false),
             "index" to index,
             "count" to items.size,
+            "volume" to volume,
             "error" to error,
         )
 
         private fun publish(newStatus: String) {
             status = newStatus
-            emit(toMap())
+            publishCurrent()
         }
 
-        private fun soap(action: String, args: String): String {
-            val body = "<?xml version=\"1.0\" encoding=\"utf-8\"?>" +
-                "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" " +
-                "s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body>" +
-                "<u:$action xmlns:u=\"${device.serviceType}\">$args</u:$action>" +
-                "</s:Body></s:Envelope>"
-            val res = request(
-                "POST", device.controlUrl,
-                mapOf(
-                    "Content-Type" to "text/xml; charset=\"utf-8\"",
-                    "SOAPACTION" to "\"${device.serviceType}#$action\"",
-                ),
-                body,
-            )
-            if (res.status !in 200..299) throw IOException("The TV refused \"$action\" (HTTP ${res.status})")
-            return res.body
+        fun publishCurrent() {
+            val map = toMap()
+            emit(map)
+            CastService.update(app, map)
+        }
+
+        private fun soap(action: String, args: String): String =
+            soapAt(device.controlUrl, device.serviceType, action, args)
+
+        private fun rendering(action: String, args: String): String? {
+            val url = device.renderUrl ?: return null
+            val type = device.renderType ?: return null
+            return soapAt(url, type, action, args)
+        }
+
+        private fun readVolume() {
+            try {
+                val xml = rendering("GetVolume", "<InstanceID>0</InstanceID><Channel>Master</Channel>") ?: return
+                Regex("<CurrentVolume>(\\d+)</CurrentVolume>").find(xml)?.groupValues?.get(1)?.toIntOrNull()
+                    ?.let { volume = it }
+            } catch (e: Exception) {
+                // volume is optional
+            }
+        }
+
+        private fun setVolume(level: Int) {
+            val v = level.coerceIn(0, 100)
+            rendering("SetVolume", "<InstanceID>0</InstanceID><Channel>Master</Channel><DesiredVolume>$v</DesiredVolume>")
+            volume = v
+            emit(mapOf("type" to "castPos", "position" to lastPosition, "duration" to lastDuration, "volume" to volume))
+        }
+
+        private fun pollPosition() {
+            try {
+                val xml = soap("GetPositionInfo", "<InstanceID>0</InstanceID>")
+                lastDuration = parseClock(Regex("<TrackDuration>(.*?)</TrackDuration>").find(xml)?.groupValues?.get(1))
+                lastPosition = parseClock(Regex("<RelTime>(.*?)</RelTime>").find(xml)?.groupValues?.get(1))
+                emit(mapOf("type" to "castPos", "position" to lastPosition, "duration" to lastDuration, "volume" to volume))
+            } catch (e: Exception) {
+                // progress is optional
+            }
         }
 
         private fun transportState(): String? {
@@ -587,10 +682,15 @@ object DlnaCaster {
                 }
                 when (state) {
                     "PLAYING", "TRANSITIONING" -> {
+                        if (!seenPlaying && volume < 0) readVolume()
                         seenPlaying = true
                         if (status != "playing") publish("playing")
+                        pollPosition()
                     }
-                    "PAUSED_PLAYBACK" -> if (status != "paused") publish("paused")
+                    "PAUSED_PLAYBACK" -> {
+                        if (status != "paused") publish("paused")
+                        pollPosition()
+                    }
                     "STOPPED", "NO_MEDIA_PRESENT" -> {
                         if (seenPlaying) return
                         if (System.currentTimeMillis() - began > 30000) {
@@ -604,9 +704,19 @@ object DlnaCaster {
             }
         }
 
-        fun control(action: String) {
+        fun control(action: String, value: Int) {
             try {
                 when (action) {
+                    "seek" -> {
+                        soap("Seek", "<InstanceID>0</InstanceID><Unit>REL_TIME</Unit><Target>${clock(value)}</Target>")
+                        lastPosition = value
+                        emit(mapOf("type" to "castPos", "position" to value, "duration" to lastDuration, "volume" to volume))
+                    }
+                    "volume" -> setVolume(value)
+                    "volumeUp", "volumeDown" -> {
+                        if (volume < 0) readVolume()
+                        if (volume >= 0) setVolume(volume + if (action == "volumeUp") 5 else -5)
+                    }
                     "pause" -> {
                         soap("Pause", "<InstanceID>0</InstanceID>")
                         publish("paused")

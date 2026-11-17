@@ -153,6 +153,12 @@ class NativeBridge {
       _methods.invokeMethod<void>('setPip', {'ready': ready, 'playing': playing});
 
   /// Turns the video into a floating window now.
+  /// Direct address of a YouTube video for the in-app player: title, url, duration (seconds).
+  Future<Map<String, dynamic>> resolveStream(String url) async {
+    final raw = await _methods.invokeMapMethod<dynamic, dynamic>('resolveStream', {'url': url});
+    return {for (final e in (raw ?? const {}).entries) e.key.toString(): e.value};
+  }
+
   Future<bool> enterPip() async => (await _methods.invokeMethod<bool>('enterPip')) ?? false;
 
   /// Picture for a file on the phone (album art, thumbnail or a video frame), or null.

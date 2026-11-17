@@ -372,22 +372,6 @@ class MainActivity : FlutterActivity() {
                 result.success(null)
             }
 
-            "resolveStream" -> {
-                val url = call.argument<String>("url")
-                if (url == null) {
-                    result.error("bad_args", "url is required", null)
-                    return
-                }
-                thread(name = "resolve-stream") {
-                    try {
-                        val r = DlnaCaster.resolveForPlayer(url)
-                        main.post { result.success(mapOf("title" to r.first, "url" to r.second, "duration" to r.third)) }
-                    } catch (e: Throwable) {
-                        main.post { result.error("resolve_failed", e.message ?: "Could not open this video", null) }
-                    }
-                }
-            }
-
             "enterPip" -> {
                 result.success(enterPip())
             }

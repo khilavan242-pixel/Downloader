@@ -145,6 +145,16 @@ class NativeBridge {
   Future<void> castAppend(List<CastItem> items) =>
       _methods.invokeMethod<void>('castAppend', {'items': items.map((i) => i.toMap()).toList()});
 
+  /// Keeps the app awake while a video plays in the background (shows a notification).
+  Future<void> keepAlive(bool on) => _methods.invokeMethod<void>('keepAlive', {'on': on});
+
+  /// Tells Android whether the video window may float (picture-in-picture) when the app is left.
+  Future<void> setPip({required bool ready, required bool playing}) =>
+      _methods.invokeMethod<void>('setPip', {'ready': ready, 'playing': playing});
+
+  /// Turns the video into a floating window now.
+  Future<bool> enterPip() async => (await _methods.invokeMethod<bool>('enterPip')) ?? false;
+
   /// Picture for a file on the phone (album art, thumbnail or a video frame), or null.
   Future<Uint8List?> mediaThumb(String uri) => _methods.invokeMethod<Uint8List>('mediaThumb', {'uri': uri});
 

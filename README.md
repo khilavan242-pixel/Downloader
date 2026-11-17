@@ -21,7 +21,7 @@ A simple Android downloader that runs entirely on your phone. No account, no API
 ## Features
 
 - **Pop-up over YouTube:** Share → Tapnab opens a small window right over YouTube. Pick MP3/MP4 and quality, tap Download, and you are back in YouTube.
-- **YouTube home:** the app opens on full-screen YouTube, with Home / Shorts / You that hide when you scroll. The old paste-a-link page is the "Link" tab. Small floating icons for Download, Cast and the Tapnab menu; a draggable floating player and a media notification with seek bar while casting.
+- **YouTube home:** the app opens on full-screen YouTube, with Home / Shorts / You that hide when you scroll. The old paste-a-link page is the "Link" tab. Small floating icons for Download, Cast and the Tapnab menu; a draggable floating player and a media notification with seek bar while casting. Videos playing in the app float as a picture-in-picture window when you leave the app (or tap the floating-window icon), keep playing in the background with the screen off, double-tap seeks (+30 s right / -10 s left) and full screen fills the screen (pinch to fit).
 - **MP3 or MP4**, with quality listed from low to high:
   - MP3: 64 · 96 · 128 · 192 · 256 · 320 kbps
   - MP4: 144p · 240p · 360p · 480p · 720p · 1080p · 1440p · 2160p · Best available

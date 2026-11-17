@@ -18,6 +18,28 @@ const _watcher = r'''
   if (window.__tapnabInit) return;
   window.__tapnabInit = true;
   if (typeof window.__tapnabOn === 'undefined') window.__tapnabOn = false;
+  if (typeof window.__tapnabKeep === 'undefined') window.__tapnabKeep = false;
+  window.__userPausedUntil = 0;
+  window.__lastTouch = 0;
+  ['touchstart','pointerdown','keydown','click'].forEach(function(n){
+    document.addEventListener(n, function(){ window.__lastTouch = Date.now(); }, true);
+  });
+  // The page pauses its player by itself when the app leaves the screen: start it again,
+  // unless the user paused it.
+  document.addEventListener('pause', function(e){
+    try {
+      var v = e.target;
+      if (!v || v.tagName !== 'VIDEO') return;
+      if (!window.__tapnabKeep || window.__tapnabOn || v.ended) return;
+      var now = Date.now();
+      if (now - window.__lastTouch < 1500 || now < window.__userPausedUntil) return;
+      setTimeout(function(){
+        if (!window.__tapnabKeep || window.__tapnabOn || v.ended || !v.paused) return;
+        if (Date.now() < window.__userPausedUntil) return;
+        var r = v.play(); if (r && r.catch) r.catch(function(){});
+      }, 150);
+    } catch (x) {}
+  }, true);
   function post(o) { try { Tapnab.postMessage(JSON.stringify(o)); } catch (e) {} }
 
   // Keep playing when the app is in the background or the screen is off (like YouTube Premium):
@@ -254,7 +276,7 @@ class BrowsePage extends StatefulWidget {
   State<BrowsePage> createState() => BrowsePageState();
 }
 
-class BrowsePageState extends State<BrowsePage> {
+class BrowsePageState extends State<BrowsePage> with WidgetsBindingObserver {
   static const _home = 'https://m.youtube.com/';
 
   WebViewController? _web;
@@ -277,6 +299,7 @@ class BrowsePageState extends State<BrowsePage> {
     c.castAdvanced.addListener(_onTvAdvanced);
     c.openVideo.addListener(_onOpenVideo);
     c.inPip.addListener(_onPip);
+    WidgetsBinding.instance.addObserver(this);
     _actionSub = c.webActions.listen(_onWebAction);
     if (widget.active) _start();
   }
@@ -287,6 +310,7 @@ class BrowsePageState extends State<BrowsePage> {
     c.castAdvanced.removeListener(_onTvAdvanced);
     c.openVideo.removeListener(_onOpenVideo);
     c.inPip.removeListener(_onPip);
+    WidgetsBinding.instance.removeObserver(this);
     _actionSub?.cancel();
     c.setWebPlaying(false);
     c.updatePip(ready: false, playing: false);
@@ -359,6 +383,7 @@ class BrowsePageState extends State<BrowsePage> {
     try {
       await w.runJavaScript(_watcher);
       await w.runJavaScript('window.__tapnabOn=${c.castTarget != null};');
+      _pushKeep();
       _flag = c.castTarget != null;
     } catch (_) {/* the page is changing; it is installed again after the next load */}
   }
@@ -378,7 +403,21 @@ class BrowsePageState extends State<BrowsePage> {
     c.updatePip(ready: ready, playing: _mediaPlaying);
   }
 
+  bool _away = false;
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _away = state != AppLifecycleState.resumed;
+    _pushKeep();
+  }
+
+  void _pushKeep() {
+    final keep = _away || c.inPip.value;
+    _web?.runJavaScript('window.__tapnabKeep=$keep;').catchError((_) {});
+  }
+
   void _onPip() {
+    _pushKeep();
     _web?.runJavaScript('window.__tapnabPip&&window.__tapnabPip(${c.inPip.value});').catchError((_) {});
     if (mounted) setState(() {});
   }
@@ -390,7 +429,7 @@ class BrowsePageState extends State<BrowsePage> {
     switch (action) {
       case 'toggle':
         w.runJavaScript(
-          "var v=document.querySelector('video');if(v){if(v.paused){v.play();}else{v.pause();}}",
+          "window.__userPausedUntil=Date.now()+3000;var v=document.querySelector('video');if(v){if(v.paused){v.play();}else{v.pause();}}",
         ).catchError((_) {});
       case 'prev':
         w.runJavaScript("var v=document.querySelector('video');if(v){v.currentTime=0;}").catchError((_) {});

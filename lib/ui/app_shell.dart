@@ -8,7 +8,6 @@ import 'browse_page.dart';
 import 'downloads_page.dart';
 import 'floating_player.dart';
 import 'home_page.dart';
-import 'player_page.dart';
 import 'settings_page.dart';
 
 /// Bottom navigation: Home, Browse, Downloads, Settings.
@@ -76,8 +75,6 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
   /// Back button: leave selection, go back in the browser, return to Home, then exit.
   Future<void> _onBack() async {
-    final pb = c.onPlayerBack;
-    if (c.playerId.value != null && pb != null && await pb()) return;
     if (c.selecting) {
       c.clearSelection();
       return;
@@ -87,15 +84,13 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       _go(_browse);
       return;
     }
-    // Leaving with a video playing floats it over other apps, like the YouTube app.
-    if (c.playerId.value != null && await c.enterPip()) return;
     await SystemNavigator.pop();
   }
 
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
-      listenable: Listenable.merge([c, c.browseVideoId, c.inPip, c.playerId, c.playerMini]),
+      listenable: Listenable.merge([c, c.browseVideoId, c.inPip]),
       builder: (context, _) {
         final active = c.activeCount;
         return PopScope(
@@ -121,16 +116,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                     ],
                   ),
                 ),
-                if (c.playerId.value != null)
-                  Positioned(
-                    left: 0,
-                    right: 0,
-                    top: (c.playerMini.value && !c.inPip.value) ? null : 0,
-                    bottom: (c.playerMini.value && !c.inPip.value) ? (_index == _browse ? 64.0 : 0.0) : 0,
-                    height: (c.playerMini.value && !c.inPip.value) ? 64.0 : null,
-                    child: PlayerView(controller: c),
-                  ),
-                if (_floatingVisible() && !c.inPip.value && c.playerId.value == null)
+                if (_floatingVisible() && !c.inPip.value)
                   Positioned.fill(child: FloatingCast(controller: c, onOpenVideo: _openVideo)),
               ],
             ),

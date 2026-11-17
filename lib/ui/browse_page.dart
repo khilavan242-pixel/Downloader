@@ -181,19 +181,6 @@ const _watcher = r'''
   }, {passive: true, capture: true});
   document.addEventListener('touchend', function(e){ if (e.touches.length < 2) pinch = 0; }, {passive: true, capture: true});
 
-  // Tapping a video opens Tapnab's own player (it floats and keeps playing); with a TV connected it plays on the TV and the page stays where it is.
-  document.addEventListener('click', function(e){
-    try {
-      var a = e.target && e.target.closest ? e.target.closest('a[href*="/watch?v="]') : null;
-      if (!a) return;
-      var m = /[?&]v=([A-Za-z0-9_-]{11})/.exec(a.getAttribute('href') || '');
-      if (!m) return;
-      e.preventDefault();
-      e.stopPropagation();
-      post({t: 'play', id: m[1]});
-    } catch (x) {}
-  }, true);
-
   // What is playing (for background play and the floating window).
   var lastMedia = '';
   setInterval(function(){
@@ -312,8 +299,6 @@ class BrowsePageState extends State<BrowsePage> with WidgetsBindingObserver {
     c.castAdvanced.addListener(_onTvAdvanced);
     c.openVideo.addListener(_onOpenVideo);
     c.inPip.addListener(_onPip);
-    c.playerId.addListener(_rebuild);
-    c.playerMini.addListener(_rebuild);
     WidgetsBinding.instance.addObserver(this);
     _actionSub = c.webActions.listen(_onWebAction);
     if (widget.active) _start();
@@ -325,8 +310,6 @@ class BrowsePageState extends State<BrowsePage> with WidgetsBindingObserver {
     c.castAdvanced.removeListener(_onTvAdvanced);
     c.openVideo.removeListener(_onOpenVideo);
     c.inPip.removeListener(_onPip);
-    c.playerId.removeListener(_rebuild);
-    c.playerMini.removeListener(_rebuild);
     WidgetsBinding.instance.removeObserver(this);
     _actionSub?.cancel();
     c.setWebPlaying(false);
@@ -380,10 +363,6 @@ class BrowsePageState extends State<BrowsePage> with WidgetsBindingObserver {
     final id = c.openVideo.value;
     if (id == null) return _home;
     c.openVideo.value = null;
-    if (c.castTarget == null) {
-      Future.microtask(() => c.openPlayer(id)); // not while the tree is being built
-      return _home;
-    }
     return 'https://m.youtube.com/watch?v=$id';
   }
 
@@ -393,10 +372,6 @@ class BrowsePageState extends State<BrowsePage> with WidgetsBindingObserver {
     final w = _web;
     if (id == null || w == null) return;
     c.openVideo.value = null;
-    if (c.castTarget == null) {
-      c.openPlayer(id);
-      return;
-    }
     if (UrlUtils.videoId(_url) != id) {
       w.loadRequest(Uri.parse('https://m.youtube.com/watch?v=$id'));
     }
@@ -424,16 +399,11 @@ class BrowsePageState extends State<BrowsePage> with WidgetsBindingObserver {
 
   /// The floating window may start only while a video plays here and no TV is connected.
   void _updatePip() {
-    if (c.playerId.value != null) return; // the in-app player controls the floating window
     final ready = _mediaPlaying && widget.active && c.castTarget == null;
     c.updatePip(ready: ready, playing: _mediaPlaying);
   }
 
   bool _away = false;
-
-  void _rebuild() {
-    if (mounted) setState(() {});
-  }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
@@ -455,7 +425,7 @@ class BrowsePageState extends State<BrowsePage> with WidgetsBindingObserver {
   /// Buttons of the floating window / background notification.
   void _onWebAction(String action) {
     final w = _web;
-    if (w == null || c.playerId.value != null) return;
+    if (w == null) return;
     switch (action) {
       case 'toggle':
         w.runJavaScript(
@@ -480,14 +450,6 @@ class BrowsePageState extends State<BrowsePage> with WidgetsBindingObserver {
     try {
       final j = jsonDecode(m.message) as Map<String, dynamic>;
       switch (j['t']) {
-        case 'play':
-          final pid = j['id'];
-          if (pid is String && c.castTarget == null) {
-            c.openPlayer(pid);
-          } else if (pid is String) {
-            // On the TV: keep browsing here; the floating window shows what plays.
-            c.castPlayNow('https://www.youtube.com/watch?v=$pid');
-          }
         case 'pivot':
           if (mounted) setState(() => _pivotHidden = true);
         case 'scroll':
@@ -603,9 +565,7 @@ class BrowsePageState extends State<BrowsePage> with WidgetsBindingObserver {
             final onWatch = pageId != null;
             final showPanel = connected && onWatch;
             final showBar = _pivotHidden && !onWatch;
-            final miniLift = (c.playerId.value != null && c.playerMini.value) ? 72.0 : 0.0;
-            final clusterBottom =
-                (!_pivotHidden ? 128.0 : (showBar && _barVisible ? 64.0 : 16.0)) + miniLift;
+            final clusterBottom = !_pivotHidden ? 128.0 : (showBar && _barVisible ? 64.0 : 16.0);
             final canDownload = UrlUtils.isDownloadablePage(_url);
 
             Rect panel = Rect.fromLTWH(0, 0, box.maxWidth, box.maxWidth * 9 / 16);
@@ -657,14 +617,6 @@ class BrowsePageState extends State<BrowsePage> with WidgetsBindingObserver {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      if (onWatch && !connected) ...[
-                        _roundButton(
-                          icon: Icons.picture_in_picture_alt_rounded,
-                          tooltip: 'Floating window',
-                          onTap: () => c.enterPip(),
-                        ),
-                        const SizedBox(height: 8),
-                      ],
                       if (canDownload) ...[
                         _roundButton(
                           icon: Icons.download_rounded,

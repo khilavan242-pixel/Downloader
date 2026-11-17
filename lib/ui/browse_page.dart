@@ -181,6 +181,19 @@ const _watcher = r'''
   }, {passive: true, capture: true});
   document.addEventListener('touchend', function(e){ if (e.touches.length < 2) pinch = 0; }, {passive: true, capture: true});
 
+  // Tapping a video opens Tapnab's own player (it floats and keeps playing); with a TV connected it plays on the TV and the page stays where it is.
+  document.addEventListener('click', function(e){
+    try {
+      var a = e.target && e.target.closest ? e.target.closest('a[href*="/watch?v="]') : null;
+      if (!a) return;
+      var m = /[?&]v=([A-Za-z0-9_-]{11})/.exec(a.getAttribute('href') || '');
+      if (!m) return;
+      e.preventDefault();
+      e.stopPropagation();
+      post({t: 'play', id: m[1]});
+    } catch (x) {}
+  }, true);
+
   // What is playing (for background play and the floating window).
   var lastMedia = '';
   setInterval(function(){
@@ -363,6 +376,10 @@ class BrowsePageState extends State<BrowsePage> with WidgetsBindingObserver {
     final id = c.openVideo.value;
     if (id == null) return _home;
     c.openVideo.value = null;
+    if (c.castTarget == null) {
+      Future.microtask(() => c.openPlayer(id)); // not while the tree is being built
+      return _home;
+    }
     return 'https://m.youtube.com/watch?v=$id';
   }
 
@@ -372,6 +389,10 @@ class BrowsePageState extends State<BrowsePage> with WidgetsBindingObserver {
     final w = _web;
     if (id == null || w == null) return;
     c.openVideo.value = null;
+    if (c.castTarget == null) {
+      c.openPlayer(id);
+      return;
+    }
     if (UrlUtils.videoId(_url) != id) {
       w.loadRequest(Uri.parse('https://m.youtube.com/watch?v=$id'));
     }
@@ -399,6 +420,7 @@ class BrowsePageState extends State<BrowsePage> with WidgetsBindingObserver {
 
   /// The floating window may start only while a video plays here and no TV is connected.
   void _updatePip() {
+    if (c.playerId.value != null) return; // the in-app player controls the floating window
     final ready = _mediaPlaying && widget.active && c.castTarget == null;
     c.updatePip(ready: ready, playing: _mediaPlaying);
   }
@@ -425,7 +447,7 @@ class BrowsePageState extends State<BrowsePage> with WidgetsBindingObserver {
   /// Buttons of the floating window / background notification.
   void _onWebAction(String action) {
     final w = _web;
-    if (w == null) return;
+    if (w == null || c.playerId.value != null) return;
     switch (action) {
       case 'toggle':
         w.runJavaScript(
@@ -450,6 +472,14 @@ class BrowsePageState extends State<BrowsePage> with WidgetsBindingObserver {
     try {
       final j = jsonDecode(m.message) as Map<String, dynamic>;
       switch (j['t']) {
+        case 'play':
+          final pid = j['id'];
+          if (pid is String && c.castTarget == null) {
+            c.openPlayer(pid);
+          } else if (pid is String) {
+            // On the TV: keep browsing here; the floating window shows what plays.
+            c.castPlayNow('https://www.youtube.com/watch?v=$pid');
+          }
         case 'pivot':
           if (mounted) setState(() => _pivotHidden = true);
         case 'scroll':

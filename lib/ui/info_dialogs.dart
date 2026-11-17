@@ -35,7 +35,7 @@ void showAbout(BuildContext context) {
   showAboutDialog(
     context: context,
     applicationName: 'Tapnab',
-    applicationVersion: '1.6.1',
+    applicationVersion: '1.7.0',
     applicationIcon: const LogoMark(size: 48),
     children: const [
       SizedBox(height: 12),

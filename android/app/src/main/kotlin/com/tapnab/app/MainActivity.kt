@@ -1,16 +1,22 @@
 package com.tapnab.app
 
 import android.Manifest
+import android.app.PendingIntent
+import android.app.PictureInPictureParams
+import android.app.RemoteAction
 import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.graphics.drawable.Icon
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.DocumentsContract
+import android.util.Rational
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.yausername.youtubedl_android.YoutubeDL
@@ -33,6 +39,8 @@ class MainActivity : FlutterActivity() {
     private var eventSink: EventChannel.EventSink? = null
     private var pendingFolderResult: MethodChannel.Result? = null
     private var pendingMediaResult: MethodChannel.Result? = null
+    private var pipReady = false
+    private var pipPlaying = false
     private var pendingShared: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -345,6 +353,27 @@ class MainActivity : FlutterActivity() {
 
             "castState" -> result.success(DlnaCaster.state())
 
+            "keepAlive" -> {
+                try {
+                    if (call.argument<Boolean>("on") == true) PlaybackService.start(applicationContext)
+                    else PlaybackService.stop(applicationContext)
+                } catch (e: Exception) {
+                    // Android may refuse to start a service while the app is in the background.
+                }
+                result.success(null)
+            }
+
+            "setPip" -> {
+                pipReady = call.argument<Boolean>("ready") == true
+                pipPlaying = call.argument<Boolean>("playing") == true
+                applyPipParams()
+                result.success(null)
+            }
+
+            "enterPip" -> {
+                result.success(enterPip())
+            }
+
             "mediaThumb" -> {
                 val uriText = call.argument<String>("uri") ?: ""
                 kotlin.concurrent.thread(name = "media-thumb") {
@@ -453,6 +482,61 @@ class MainActivity : FlutterActivity() {
         } catch (e: Exception) {
             result.error("folder_failed", e.message ?: "Could not use that folder", null)
         }
+    }
+
+    // ---- picture-in-picture (floating video window) -----------------------------------
+
+    private fun pipAction(icon: Int, label: String, code: Int, action: String): RemoteAction =
+        RemoteAction(
+            Icon.createWithResource(this, icon), label, label,
+            PendingIntent.getBroadcast(
+                this, code,
+                Intent(this, CastActionReceiver::class.java).setAction(action),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            ),
+        )
+
+    private fun pipParams(): PictureInPictureParams {
+        val b = PictureInPictureParams.Builder()
+            .setAspectRatio(Rational(16, 9))
+            .setActions(
+                listOf(
+                    pipAction(R.drawable.ic_prev, "Restart", 21, PlaybackService.ACTION_WEB_PREV),
+                    if (pipPlaying) pipAction(R.drawable.ic_pause, "Pause", 22, PlaybackService.ACTION_WEB_TOGGLE)
+                    else pipAction(R.drawable.ic_play, "Play", 22, PlaybackService.ACTION_WEB_TOGGLE),
+                    pipAction(R.drawable.ic_next, "Next", 23, PlaybackService.ACTION_WEB_NEXT),
+                ),
+            )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            b.setAutoEnterEnabled(pipReady)
+        }
+        return b.build()
+    }
+
+    private fun applyPipParams() {
+        try {
+            setPictureInPictureParams(pipParams())
+        } catch (e: Exception) {
+            // picture-in-picture is not available on this device
+        }
+    }
+
+    private fun enterPip(): Boolean =
+        try {
+            enterPictureInPictureMode(pipParams())
+        } catch (e: Exception) {
+            false
+        }
+
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        // Android 12+ enters by itself (auto-enter); older versions are asked here.
+        if (pipReady && Build.VERSION.SDK_INT < Build.VERSION_CODES.S) enterPip()
+    }
+
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        DlnaCaster.emitExternal(mapOf("type" to "pip", "on" to isInPictureInPictureMode))
     }
 
     /** While casting, the phone's volume keys change the TV volume, like in the YouTube app. */

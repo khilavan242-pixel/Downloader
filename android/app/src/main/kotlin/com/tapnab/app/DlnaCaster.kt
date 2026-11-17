@@ -151,7 +151,7 @@ object DlnaCaster {
     fun state(): Map<String, Any?> = session?.toMap() ?: mapOf("type" to "cast", "status" to "idle")
 
     /** Finds a direct, ready-to-play address for a YouTube link. Call off the main thread. */
-    private fun resolveStream(pageUrl: String, audioOnly: Boolean): Pair<String, String> {
+    private fun resolveStream(pageUrl: String, audioOnly: Boolean): Triple<String, String, Int> {
         TapnabApp.awaitReady()
         val req = com.yausername.youtubedl_android.YoutubeDLRequest(pageUrl).apply {
             addOption("--no-playlist")
@@ -166,15 +166,17 @@ object DlnaCaster {
                         "best[ext=mp4][acodec!=none][height<=720]/best[ext=mp4][acodec!=none]/best[acodec!=none]",
                 )
             }
-            addOption("--print", "%(title)s\t%(url)s")
+            addOption("--print", "%(title)s\t%(duration)s\t%(url)s")
         }
         val out = com.yausername.youtubedl_android.YoutubeDL.getInstance().execute(req, null) { _, _, _ -> }.out
         val line = out.lineSequence().map { it.trim() }.lastOrNull { it.contains("http") }
             ?: throw IOException("Could not get a playable address for this video.")
-        val title = line.substringBefore('\t', "")
-        val url = line.substringAfter('\t')
-        if (!url.startsWith("http")) throw IOException("Could not get a playable address for this video.")
-        return title to url
+        val parts = line.split('\t', limit = 3)
+        if (parts.size < 3 || !parts[2].startsWith("http")) {
+            throw IOException("Could not get a playable address for this video.")
+        }
+        val seconds = parts[1].toDoubleOrNull()?.toInt() ?: 0
+        return Triple(parts[0], parts[2], seconds)
     }
 
     private fun stopSession() {
@@ -188,6 +190,9 @@ object DlnaCaster {
     private fun emit(map: Map<String, Any?>) {
         listener?.invoke(map)
     }
+
+    /** Lets other parts of the app (notification / picture-in-picture buttons) talk to Flutter. */
+    fun emitExternal(map: Map<String, Any?>) = emit(map)
 
     // ---- discovery helpers --------------------------------------------------------
 
@@ -537,6 +542,21 @@ object DlnaCaster {
         @Volatile private var lastPosition = -1
         @Volatile private var lastDuration = -1
         private val liveTitles = ConcurrentHashMap<Int, String>()
+        private val durations = ConcurrentHashMap<Int, Int>()
+
+        // Some set-top boxes never report the position, so it is also tracked by the clock.
+        @Volatile private var startedAt = 0L
+        @Volatile private var pausedAt = 0L
+        @Volatile private var pausedTotal = 0L
+        @Volatile private var seekBase = 0
+        @Volatile private var tvReports = false
+
+        private class Prepared(val index: Int, val title: String, val url: String, val seconds: Int)
+
+        @Volatile private var prepared: Prepared? = null
+        @Volatile private var preparing = -1
+        @Volatile private var handover = false
+        @Volatile private var switchedWhilePlaying = false
 
         @Volatile private var jumpTo = -1
         @Volatile private var finishedUp = false
@@ -591,16 +611,55 @@ object DlnaCaster {
             emit(mapOf("type" to "castPos", "position" to lastPosition, "duration" to lastDuration, "volume" to volume))
         }
 
+        private fun knownDuration(): Int = if (lastDuration > 0) lastDuration else durations[index] ?: 0
+
+        private fun estimatedPosition(): Int {
+            if (tvReports && lastPosition >= 0) return lastPosition
+            if (startedAt == 0L) return 0
+            val now = System.currentTimeMillis()
+            val paused = pausedTotal + if (pausedAt > 0) now - pausedAt else 0L
+            return maxOf(0, seekBase + ((now - startedAt - paused) / 1000).toInt())
+        }
+
         private fun pollPosition() {
             try {
                 val xml = soap("GetPositionInfo", "<InstanceID>0</InstanceID>")
                 lastDuration = parseClock(Regex("<TrackDuration>(.*?)</TrackDuration>").find(xml)?.groupValues?.get(1))
                 lastPosition = parseClock(Regex("<RelTime>(.*?)</RelTime>").find(xml)?.groupValues?.get(1))
-                emit(mapOf("type" to "castPos", "position" to lastPosition, "duration" to lastDuration, "volume" to volume))
-                CastService.progress(app, lastPosition, lastDuration)
+                if (lastPosition > 0) tvReports = true
             } catch (e: Exception) {
                 // progress is optional
             }
+            val pos = estimatedPosition()
+            val dur = knownDuration()
+            emit(mapOf("type" to "castPos", "position" to pos, "duration" to dur, "volume" to volume))
+            CastService.progress(app, pos, dur)
+        }
+
+        /** Resolves the next YouTube video ahead of time so the switch is instant. */
+        private fun prefetchNext() {
+            val next = index + 1
+            if (next >= items.size || preparing == next || prepared?.index == next) return
+            val nextItem = items[next]
+            if (!nextItem.stream) return
+            preparing = next // also stops retries if it fails; it is then resolved normally
+            thread(name = "dlna-prefetch") {
+                try {
+                    val (t, u, sec) = resolveStream(nextItem.uri, nextItem.mime.startsWith("audio"))
+                    prepared = Prepared(next, t, u, sec)
+                } catch (e: Exception) {
+                    // resolved again when it is needed
+                }
+            }
+        }
+
+        private fun load(url: String, title: String, mime: String) {
+            soap(
+                "SetAVTransportURI",
+                "<InstanceID>0</InstanceID><CurrentURI>${esc(url)}</CurrentURI>" +
+                    "<CurrentURIMetaData>${esc(didl(title, url, mime))}</CurrentURIMetaData>",
+            )
+            soap("Play", "<InstanceID>0</InstanceID><Speed>1</Speed>")
         }
 
         private fun transportState(): String? {
@@ -614,24 +673,35 @@ object DlnaCaster {
                     val item = items[index]
                     lastPosition = -1
                     lastDuration = -1
+                    val keepPlaying = handover
+                    handover = false
+                    tvReports = false
+                    if (prepared?.index != index + 1) preparing = -1
                     publish("loading")
                     var title = item.title
                     val url: String
                     if (item.stream) {
-                        val resolved = try {
-                            resolveStream(item.uri, item.mime.startsWith("audio"))
-                        } catch (e: Exception) {
-                            // One video that cannot be played should not end the whole queue.
-                            if (cancelled || index + 1 >= items.size) throw e
-                            Log.w(TAG, "skipping unplayable item", e)
-                            index += 1
-                            continue
+                        val pre = prepared
+                        val resolved: Triple<String, String, Int> = if (pre != null && pre.index == index) {
+                            prepared = null
+                            Triple(pre.title, pre.url, pre.seconds)
+                        } else {
+                            try {
+                                resolveStream(item.uri, item.mime.startsWith("audio"))
+                            } catch (e: Exception) {
+                                // One video that cannot be played should not end the whole queue.
+                                if (cancelled || index + 1 >= items.size) throw e
+                                Log.w(TAG, "skipping unplayable item", e)
+                                index += 1
+                                continue
+                            }
                         }
-                        val (found, address) = resolved
+                        val (found, address, seconds) = resolved
                         if (found.isNotBlank()) {
                             title = found
                             liveTitles[index] = found
                         }
+                        if (seconds > 0) durations[index] = seconds
                         url = address
                     } else {
                         val ext = when (item.mime) {
@@ -643,20 +713,37 @@ object DlnaCaster {
                         url = "http://$ip:${server.port}/m/$name"
                     }
                     if (cancelled) break
-                    try {
-                        soap("Stop", "<InstanceID>0</InstanceID>")
-                    } catch (e: Exception) {
-                        // nothing was playing
+                    if (keepPlaying) {
+                        // The TV is still playing the previous video: hand over without a Stop,
+                        // because some boxes leave DLNA mode ("Thanks for watching") on Stop / end.
+                        try {
+                            load(url, title, item.mime)
+                        } catch (e: Exception) {
+                            try {
+                                soap("Stop", "<InstanceID>0</InstanceID>")
+                            } catch (e2: Exception) {
+                                // already idle
+                            }
+                            Thread.sleep(800)
+                            load(url, title, item.mime)
+                        }
+                    } else {
+                        try {
+                            soap("Stop", "<InstanceID>0</InstanceID>")
+                        } catch (e: Exception) {
+                            // nothing was playing
+                        }
+                        load(url, title, item.mime)
                     }
-                    soap(
-                        "SetAVTransportURI",
-                        "<InstanceID>0</InstanceID><CurrentURI>${esc(url)}</CurrentURI>" +
-                            "<CurrentURIMetaData>${esc(didl(title, url, item.mime))}</CurrentURIMetaData>",
-                    )
-                    soap("Play", "<InstanceID>0</InstanceID><Speed>1</Speed>")
+                    startedAt = System.currentTimeMillis()
+                    pausedAt = 0L
+                    pausedTotal = 0L
+                    seekBase = 0
                     publish("playing")
                     waitForEnd()
                     if (cancelled) break
+                    handover = switchedWhilePlaying || jumpTo >= 0
+                    switchedWhilePlaying = false
                     index = if (jumpTo >= 0) jumpTo else index + 1
                     jumpTo = -1
                 }
@@ -696,12 +783,34 @@ object DlnaCaster {
                 when (state) {
                     "PLAYING", "TRANSITIONING" -> {
                         if (!seenPlaying && volume < 0) readVolume()
+                        if (!seenPlaying) {
+                            // The picture really started now (not when we sent Play).
+                            startedAt = System.currentTimeMillis()
+                            pausedAt = 0L
+                            pausedTotal = 0L
+                            seekBase = 0
+                        }
                         seenPlaying = true
                         if (status != "playing") publish("playing")
                         pollPosition()
                         // Some set-top boxes stay on "playing" at the very end: treat that as finished.
-                        if (lastDuration > 5 && lastPosition >= lastDuration - 1) atEnd++ else atEnd = 0
+                        val settled = System.currentTimeMillis() - startedAt > 8000
+                        if (settled && lastDuration > 5 && lastPosition >= lastDuration - 1) atEnd++ else atEnd = 0
                         if (atEnd >= 3) return
+                        val dur = knownDuration()
+                        if (dur > 0 && settled) {
+                            val pos = estimatedPosition()
+                            if (pos >= dur / 2 || dur - pos <= 60) prefetchNext()
+                            // Move on a moment before the end, so the box never reaches its
+                            // own "end of video" screen and the next video follows without a gap.
+                            if (index + 1 < items.size && pos >= dur - 3) {
+                                val nextItem = items[index + 1]
+                                if (!nextItem.stream || prepared?.index == index + 1) {
+                                    switchedWhilePlaying = true
+                                    return
+                                }
+                            }
+                        }
                     }
                     "PAUSED_PLAYBACK" -> {
                         if (status != "paused") publish("paused")
@@ -726,8 +835,12 @@ object DlnaCaster {
                     "seek" -> {
                         soap("Seek", "<InstanceID>0</InstanceID><Unit>REL_TIME</Unit><Target>${clock(value)}</Target>")
                         lastPosition = value
-                        emit(mapOf("type" to "castPos", "position" to value, "duration" to lastDuration, "volume" to volume))
-                        CastService.progress(app, value, lastDuration)
+                        seekBase = value
+                        startedAt = System.currentTimeMillis()
+                        pausedTotal = 0L
+                        if (pausedAt > 0) pausedAt = startedAt
+                        emit(mapOf("type" to "castPos", "position" to value, "duration" to knownDuration(), "volume" to volume))
+                        CastService.progress(app, value, knownDuration())
                     }
                     "volume" -> changeVolume(value)
                     "volumeUp", "volumeDown" -> {
@@ -736,10 +849,15 @@ object DlnaCaster {
                     }
                     "pause" -> {
                         soap("Pause", "<InstanceID>0</InstanceID>")
+                        if (pausedAt == 0L) pausedAt = System.currentTimeMillis()
                         publish("paused")
                     }
                     "resume" -> {
                         soap("Play", "<InstanceID>0</InstanceID><Speed>1</Speed>")
+                        if (pausedAt > 0) {
+                            pausedTotal += System.currentTimeMillis() - pausedAt
+                            pausedAt = 0L
+                        }
                         publish("playing")
                     }
                     "next" -> jumpTo = minOf(index + 1, items.size)

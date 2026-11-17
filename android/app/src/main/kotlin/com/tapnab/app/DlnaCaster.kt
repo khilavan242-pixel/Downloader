@@ -151,6 +151,9 @@ object DlnaCaster {
     fun state(): Map<String, Any?> = session?.toMap() ?: mapOf("type" to "cast", "status" to "idle")
 
     /** Finds a direct, ready-to-play address for a YouTube link. Call off the main thread. */
+    /** Title, direct address and length (seconds) of a YouTube video, for the in-app player. */
+    fun resolveForPlayer(pageUrl: String): Triple<String, String, Int> = resolveStream(pageUrl, false)
+
     private fun resolveStream(pageUrl: String, audioOnly: Boolean): Triple<String, String, Int> {
         TapnabApp.awaitReady()
         val req = com.yausername.youtubedl_android.YoutubeDLRequest(pageUrl).apply {

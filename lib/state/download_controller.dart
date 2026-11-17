@@ -98,48 +98,6 @@ class DownloadController extends ChangeNotifier {
   /// Set by the floating player to ask Browse to show this video's page.
   final ValueNotifier<String?> openVideo = ValueNotifier<String?>(null);
 
-  /// The video open in Tapnab's own player (null = player closed).
-  final ValueNotifier<String?> playerId = ValueNotifier<String?>(null);
-
-  /// Set by the open player: handles the Back button (minimize / leave full screen).
-  /// Returns true when it handled the press.
-  Future<bool> Function()? onPlayerBack;
-
-  /// The player is shrunk to the small bar above the bottom of the screen (browse while it plays).
-  final ValueNotifier<bool> playerMini = ValueNotifier<bool>(false);
-
-  void openPlayer(String id) {
-    playerMini.value = false;
-    playerId.value = id;
-  }
-
-  void closePlayer() {
-    playerMini.value = false;
-    playerId.value = null;
-    setWebPlaying(false);
-    updatePip(ready: false, playing: false);
-  }
-
-  Future<Map<String, dynamic>> resolveStream(String id) =>
-      _bridge.resolveStream('https://www.youtube.com/watch?v=$id');
-
-  /// Videos that follow [id] (its Mix), for the player's "Up next" list.
-  Future<List<PlaylistEntry>> upNext(String id, String title) async {
-    var all = await _related(id, null);
-    if (all.length < 2 && title.trim().isNotEmpty) {
-      // The Mix was not available: list what a search for the title finds.
-      try {
-        all = await _bridge.fetchPlaylist('ytsearch15:${title.trim()}');
-      } catch (_) {/* nothing to offer */}
-    }
-    final at = all.indexWhere((e) => UrlUtils.videoId(e.url) == id);
-    final after = at >= 0 ? all.sublist(at + 1) : all;
-    return [
-      for (final e in after)
-        if (UrlUtils.videoId(e.url) != null && UrlUtils.videoId(e.url) != id) e,
-    ];
-  }
-
   /// True while the app is shown as a small floating window (picture-in-picture).
   final ValueNotifier<bool> inPip = ValueNotifier<bool>(false);
 
@@ -1139,8 +1097,6 @@ class DownloadController extends ChangeNotifier {
     castAdvanced.dispose();
     browseVideoId.dispose();
     openVideo.dispose();
-    playerId.dispose();
-    playerMini.dispose();
     _keepTimer?.cancel();
     inPip.dispose();
     _webActions.close();

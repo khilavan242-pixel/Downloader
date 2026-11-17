@@ -16,8 +16,10 @@ import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import android.os.Build
 import android.os.Bundle
+import android.net.wifi.WifiManager
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.os.IBinder
 import androidx.core.content.ContextCompat
 import java.net.URL
@@ -34,10 +36,12 @@ class CastService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val device = intent?.getStringExtra(EXTRA_DEVICE) ?: "TV"
         running = true
+        instance = this
         if (lastState == null || lastState?.get("device") != device) {
             lastState = mapOf("status" to "loading", "device" to device)
         }
         applySession(applicationContext, lastState!!)
+        acquireLocks()
         val notification = build(this, lastState!!)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
@@ -49,11 +53,61 @@ class CastService : Service() {
 
     override fun onDestroy() {
         running = false
+        instance = null
         releaseSession()
+        try {
+            wake?.takeIf { it.isHeld }?.release()
+            wifi?.takeIf { it.isHeld }?.release()
+        } catch (e: Exception) {
+            // already released
+        }
+        wake = null
+        wifi = null
         super.onDestroy()
     }
 
+    private var wake: PowerManager.WakeLock? = null
+    private var wifi: WifiManager.WifiLock? = null
+
+    /** Keeps the CPU and Wi-Fi awake so the next video is still queued with the screen off. */
+    @Synchronized
+    private fun acquireLocks() {
+        if (wake == null) {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            wake = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "tapnab:cast").apply {
+                setReferenceCounted(false)
+            }
+        }
+        // Re-arm for every new video so a long queue never outlives the lock's timeout.
+        wake?.acquire(4 * 60 * 60 * 1000L)
+        if (wifi == null) {
+            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            wifi = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "tapnab:cast").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        }
+    }
+
+    /** Lets the CPU / Wi-Fi sleep while nothing plays (paused, stopped, error) to save battery. */
+    @Synchronized
+    private fun releaseLocks() {
+        try {
+            wake?.takeIf { it.isHeld }?.release()
+            wifi?.takeIf { it.isHeld }?.release()
+        } catch (e: Exception) {
+            // already released
+        }
+        wake = null
+        wifi = null
+    }
+
+    private fun follow(status: String) {
+        if (status == "playing" || status == "loading") acquireLocks() else releaseLocks()
+    }
+
     companion object {
+        @Volatile private var instance: CastService? = null
         private const val CHANNEL_ID = "casting"
         private const val NOTIFICATION_ID = 1002
         private const val EXTRA_DEVICE = "device"
@@ -95,6 +149,7 @@ class CastService : Service() {
             }
             lastState = state
             if (!running) return
+            instance?.follow(state["status"] as? String ?: "loading")
             applySession(app, state)
             notifyNow(app, state)
             loadThumb(app, state)

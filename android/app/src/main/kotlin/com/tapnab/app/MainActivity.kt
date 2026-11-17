@@ -40,6 +40,7 @@ class MainActivity : FlutterActivity() {
     private var pendingFolderResult: MethodChannel.Result? = null
     private var pendingMediaResult: MethodChannel.Result? = null
     private var pipReady = false
+    private var keepWeb = false
     private var pipPlaying = false
     private var pendingShared: String? = null
 
@@ -354,6 +355,7 @@ class MainActivity : FlutterActivity() {
             "castState" -> result.success(DlnaCaster.state())
 
             "keepAlive" -> {
+                keepWeb = call.argument<Boolean>("on") == true
                 try {
                     if (call.argument<Boolean>("on") == true) PlaybackService.start(applicationContext)
                     else PlaybackService.stop(applicationContext)
@@ -527,6 +529,38 @@ class MainActivity : FlutterActivity() {
         } catch (e: Exception) {
             false
         }
+
+    private fun findWebViews(v: android.view.View, out: MutableList<android.webkit.WebView>) {
+        if (v is android.webkit.WebView) out.add(v)
+        if (v is android.view.ViewGroup) {
+            for (i in 0 until v.childCount) findWebViews(v.getChildAt(i), out)
+        }
+    }
+
+    /** A page that plays video must not be paused just because the app left the screen. */
+    private fun keepWebRunning() {
+        if (!keepWeb) return
+        try {
+            val found = ArrayList<android.webkit.WebView>()
+            findWebViews(window.decorView, found)
+            for (w in found) {
+                w.onResume()
+                w.resumeTimers()
+            }
+        } catch (e: Exception) {
+            // best effort
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        keepWebRunning()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        keepWebRunning()
+    }
 
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()

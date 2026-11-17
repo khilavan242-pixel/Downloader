@@ -39,6 +39,8 @@ class _PlayerViewState extends State<PlayerView> {
   bool _full = false;
   bool _cover = false;
   bool _advancing = false;
+  bool _auto = false; // the current load was started by auto-play
+  int _skips = 0;
   bool _lastPlaying = false;
   double? _drag;
   double _boxWidth = 0;
@@ -130,6 +132,8 @@ class _PlayerViewState extends State<PlayerView> {
         _loading = false;
       });
       await vc.play();
+      _skips = 0;
+      _auto = false;
       _lastPlaying = true;
       c.setWebPlaying(true);
       c.updatePip(ready: true, playing: true);
@@ -137,6 +141,13 @@ class _PlayerViewState extends State<PlayerView> {
       if (_queue.length < 3) unawaited(_loadQueue(id, seq));
     } catch (_) {
       if (!mounted || seq != _seq) return;
+      if (_auto && _skips < 3) {
+        // This video cannot be played: go on to the next one, like the YouTube app.
+        _skips++;
+        unawaited(_next());
+        return;
+      }
+      _auto = false;
       setState(() {
         _loading = false;
         _error = 'Could not play this video. Check your connection and try again.';
@@ -146,7 +157,12 @@ class _PlayerViewState extends State<PlayerView> {
 
   Future<void> _loadQueue(String id, int seq) async {
     try {
-      final list = await c.upNext(id);
+      var list = await c.upNext(id, _title);
+      if (list.isEmpty) {
+        await Future<void>.delayed(const Duration(seconds: 4));
+        if (!mounted || seq != _seq) return;
+        list = await c.upNext(id, _title);
+      }
       if (!mounted || seq != _seq) return;
       setState(() {
         _queue = [
@@ -175,20 +191,34 @@ class _PlayerViewState extends State<PlayerView> {
         _preFuture = _tryResolve(next);
       }
     }
-    if (!_advancing && left < const Duration(milliseconds: 400) && !v.isPlaying) {
+    if (!_advancing && (v.isCompleted || (left < const Duration(milliseconds: 400) && !v.isPlaying))) {
       _advancing = true;
-      _next();
+      _auto = true;
+      unawaited(_next());
     }
   }
 
-  void _next() {
+  Future<void> _next() async {
     if (_queue.isEmpty) {
-      _snack('No next video yet');
+      final id = _id;
+      if (id != null) {
+        try {
+          final list = await c.upNext(id, _title);
+          if (!mounted || id != _id) return;
+          _queue = [
+            for (final e in list)
+              if (!_played.contains(UrlUtils.videoId(e.url))) e,
+          ];
+        } catch (_) {/* handled below */}
+      }
+    }
+    if (_queue.isEmpty) {
+      _snack('No next video found');
       return;
     }
     final e = _queue.removeAt(0);
-    final id = UrlUtils.videoId(e.url);
-    if (id != null) unawaited(_load(id));
+    final nid = UrlUtils.videoId(e.url);
+    if (nid != null) unawaited(_load(nid));
   }
 
   void _prev() {
@@ -267,18 +297,24 @@ class _PlayerViewState extends State<PlayerView> {
     SystemChrome.setEnabledSystemUIMode(on ? SystemUiMode.immersiveSticky : SystemUiMode.edgeToEdge);
   }
 
-  /// Chevron / back button: float the video over other apps, like the YouTube app.
-  Future<void> _minimize() async {
-    if (_vc != null && await c.enterPip()) return;
-    _close();
+  /// Chevron / swipe down: shrink to the small bar so the app can be browsed (like the YouTube app).
+  void _minimize() {
+    if (_full) _setFull(false);
+    c.playerMini.value = true;
   }
 
-  Future<void> _handleBack() async {
+  /// Back button. Returns true when handled here; false lets the app handle it
+  /// (the player is already the small bar).
+  Future<bool> _handleBack() async {
     if (_full) {
       _setFull(false);
-      return;
+      return true;
     }
-    await _minimize();
+    if (!c.playerMini.value) {
+      c.playerMini.value = true;
+      return true;
+    }
+    return false;
   }
 
   void _close() {
@@ -338,6 +374,11 @@ class _PlayerViewState extends State<PlayerView> {
                     tooltip: 'Minimize',
                   ),
                   const Spacer(),
+                  IconButton(
+                    onPressed: () => c.enterPip(),
+                    icon: const Icon(Icons.picture_in_picture_alt_rounded, color: Colors.white),
+                    tooltip: 'Floating window',
+                  ),
                   IconButton(
                     onPressed: () => setState(() => _cover = !_cover),
                     icon: Icon(_cover ? Icons.fit_screen_rounded : Icons.zoom_out_map_rounded, color: Colors.white),
@@ -438,6 +479,9 @@ class _PlayerViewState extends State<PlayerView> {
                     _showControls();
                   }
                 },
+                onVerticalDragEnd: (d) {
+                  if ((d.primaryVelocity ?? 0) > 400) _minimize();
+                },
                 onDoubleTapDown: (d) => _tapX = d.localPosition.dx,
                 onDoubleTap: () => _seekBy(_tapX < _boxWidth / 2 ? -10 : 30),
               ),
@@ -462,11 +506,12 @@ class _PlayerViewState extends State<PlayerView> {
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
-      listenable: c.inPip,
+      listenable: Listenable.merge([c.inPip, c.playerMini]),
       builder: (context, _) {
         if (c.inPip.value) {
           return ColoredBox(color: Colors.black, child: _picture());
         }
+        if (c.playerMini.value) return _miniBar();
         final scheme = Theme.of(context).colorScheme;
         if (_full) {
           return Material(color: Colors.black, child: _videoBox());
@@ -514,6 +559,43 @@ class _PlayerViewState extends State<PlayerView> {
           ),
         );
       },
+    );
+  }
+
+  Widget _miniBar() {
+    final vc = _vc;
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: scheme.surfaceContainerHigh,
+      elevation: 6,
+      child: InkWell(
+        onTap: () => c.playerMini.value = false,
+        child: Row(
+          children: [
+            SizedBox(width: 114, height: 64, child: ColoredBox(color: Colors.black, child: _picture())),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                child: Text(
+                  _loading && _title.isEmpty ? 'Loading...' : _title,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+              ),
+            ),
+            if (vc != null)
+              ValueListenableBuilder<VideoPlayerValue>(
+                valueListenable: vc,
+                builder: (context, v, _) => IconButton(
+                  onPressed: _toggle,
+                  icon: Icon(v.isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded),
+                ),
+              ),
+            IconButton(onPressed: _close, icon: const Icon(Icons.close_rounded)),
+          ],
+        ),
+      ),
     );
   }
 

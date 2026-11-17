@@ -312,6 +312,8 @@ class BrowsePageState extends State<BrowsePage> with WidgetsBindingObserver {
     c.castAdvanced.addListener(_onTvAdvanced);
     c.openVideo.addListener(_onOpenVideo);
     c.inPip.addListener(_onPip);
+    c.playerId.addListener(_rebuild);
+    c.playerMini.addListener(_rebuild);
     WidgetsBinding.instance.addObserver(this);
     _actionSub = c.webActions.listen(_onWebAction);
     if (widget.active) _start();
@@ -323,6 +325,8 @@ class BrowsePageState extends State<BrowsePage> with WidgetsBindingObserver {
     c.castAdvanced.removeListener(_onTvAdvanced);
     c.openVideo.removeListener(_onOpenVideo);
     c.inPip.removeListener(_onPip);
+    c.playerId.removeListener(_rebuild);
+    c.playerMini.removeListener(_rebuild);
     WidgetsBinding.instance.removeObserver(this);
     _actionSub?.cancel();
     c.setWebPlaying(false);
@@ -426,6 +430,10 @@ class BrowsePageState extends State<BrowsePage> with WidgetsBindingObserver {
   }
 
   bool _away = false;
+
+  void _rebuild() {
+    if (mounted) setState(() {});
+  }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
@@ -595,7 +603,9 @@ class BrowsePageState extends State<BrowsePage> with WidgetsBindingObserver {
             final onWatch = pageId != null;
             final showPanel = connected && onWatch;
             final showBar = _pivotHidden && !onWatch;
-            final clusterBottom = !_pivotHidden ? 128.0 : (showBar && _barVisible ? 64.0 : 16.0);
+            final miniLift = (c.playerId.value != null && c.playerMini.value) ? 72.0 : 0.0;
+            final clusterBottom =
+                (!_pivotHidden ? 128.0 : (showBar && _barVisible ? 64.0 : 16.0)) + miniLift;
             final canDownload = UrlUtils.isDownloadablePage(_url);
 
             Rect panel = Rect.fromLTWH(0, 0, box.maxWidth, box.maxWidth * 9 / 16);

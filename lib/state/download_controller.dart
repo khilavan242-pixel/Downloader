@@ -70,6 +70,10 @@ class DownloadController extends ChangeNotifier {
   bool _queueing = false;
   bool _continuing = false;
   bool _wasActive = false;
+  bool _webPlaying = false;
+  bool _keeping = false;
+  Timer? _keepTimer;
+  DateTime _lastMore = DateTime(2000);
   SortMode _sort = SortMode.newest;
   MediaKind? _kindFilter;
 
@@ -94,8 +98,56 @@ class DownloadController extends ChangeNotifier {
   /// Set by the floating player to ask Browse to show this video's page.
   final ValueNotifier<String?> openVideo = ValueNotifier<String?>(null);
 
+  /// True while the app is shown as a small floating window (picture-in-picture).
+  final ValueNotifier<bool> inPip = ValueNotifier<bool>(false);
+
+  final StreamController<String> _webActions = StreamController<String>.broadcast();
+
+  /// Buttons pressed on the floating window / background notification: toggle, prev, next.
+  Stream<String> get webActions => _webActions.stream;
+
+  /// True while the TV is loading the next video (so the screen shows a spinner, not "Play on TV").
+  bool get castBusy => _continuing;
+
+  /// A YouTube video is playing inside the app. Keeps the app alive in the background.
+  void setWebPlaying(bool playing) {
+    if (playing == _webPlaying) return;
+    _webPlaying = playing;
+    if (playing) {
+      _keepTimer?.cancel();
+      if (!_keeping) {
+        _keeping = true;
+        unawaited(_bridge.keepAlive(true).catchError((_) {}));
+      }
+    } else {
+      // Stay alive for a while after a pause, so Play from the notification still works.
+      _keepTimer?.cancel();
+      _keepTimer = Timer(const Duration(seconds: 120), () {
+        if (_webPlaying || !_keeping) return;
+        _keeping = false;
+        unawaited(_bridge.keepAlive(false).catchError((_) {}));
+      });
+    }
+  }
+
+  /// Lets the video float when the user leaves the app.
+  void updatePip({required bool ready, required bool playing}) {
+    unawaited(_bridge.setPip(ready: ready, playing: playing).catchError((_) {}));
+  }
+
+  Future<bool> enterPip() => _bridge.enterPip();
+
   /// Picture for a file on the phone, cached.
   Future<Uint8List?> thumbFor(String uri) => _thumbs.putIfAbsent(uri, () => _bridge.mediaThumb(uri));
+
+  /// The first "up next" video the open YouTube page lists for [id], or null.
+  String? firstRelated(String id) {
+    for (final e in _pageRelated[id] ?? const <PlaylistEntry>[]) {
+      final eid = UrlUtils.videoId(e.url);
+      if (eid != null && eid != id) return eid;
+    }
+    return null;
+  }
 
   /// "Up next" videos found on the open YouTube page (used when the Mix list is not available).
   void offerRelated(String id, List<String> ids) {
@@ -632,6 +684,11 @@ class DownloadController extends ChangeNotifier {
       [CastItem(uri: 'https://www.youtube.com/watch?v=$id', title: 'YouTube video', mime: 'video/mp4', stream: true)],
     );
     if (seq != _queueSeq) return;
+    unawaited(_topUp(id, listUrl, seq));
+  }
+
+  /// Fills the queue behind the playing video (in the background, with retries).
+  Future<void> _topUp(String id, String? listUrl, int seq) async {
     var added = await _queueMore(id, listUrl, seq);
     // The page may not have listed its "up next" videos yet: try again shortly.
     for (var attempt = 0; attempt < 2 && added == 0 && seq == _queueSeq && _target != null; attempt++) {
@@ -686,9 +743,28 @@ class DownloadController extends ChangeNotifier {
   }
 
   /// The queue ran out (the TV stopped by itself): start the next related video.
-  Future<void> _continueAfterEnd(String id) async {
+  Future<void> _continueAfterEnd(String id) => _playNextRelated(id);
+
+  /// Next on the TV. Uses the queue; when the queue is empty it finds a related
+  /// video and plays it straight away, like the YouTube app.
+  Future<void> castNext() async {
+    final s = _cast;
+    final id = _castVideoId;
+    if (s.active && s.index < s.count - 1) {
+      await castControl('next');
+      return;
+    }
+    if (id == null) {
+      await castControl('next');
+      return;
+    }
+    await _playNextRelated(id);
+  }
+
+  Future<void> _playNextRelated(String id) async {
     if (_continuing) return;
     _continuing = true;
+    notifyListeners();
     try {
       final seq = _queueSeq;
       final entries = await _related(id, null);
@@ -700,8 +776,10 @@ class DownloadController extends ChangeNotifier {
         await castPlayNow('https://www.youtube.com/watch?v=$eid', keepHistory: true);
         return;
       }
+      _say('No next video found');
     } finally {
       _continuing = false;
+      notifyListeners();
     }
   }
 
@@ -891,6 +969,7 @@ class DownloadController extends ChangeNotifier {
   // ---- app lifecycle -------------------------------------------------------
 
   Future<void> onAppResumed() async {
+    inPip.value = false;
     await _syncNative();
     try {
       _cast = await _bridge.castState();
@@ -951,10 +1030,30 @@ class DownloadController extends ChangeNotifier {
       return;
     }
     if (e['type'] == 'castPos') {
-      castProgress.value = CastProgress(
-        position: (e['position'] as num?)?.toInt() ?? 0,
-        duration: (e['duration'] as num?)?.toInt() ?? 0,
-      );
+      final pos = (e['position'] as num?)?.toInt() ?? 0;
+      final dur = (e['duration'] as num?)?.toInt() ?? 0;
+      castProgress.value = CastProgress(position: pos, duration: dur);
+      // Near the end of the last queued video and nothing is queued behind it: look again.
+      final id = _castVideoId;
+      if (id != null &&
+          dur > 20 &&
+          pos >= dur - 25 &&
+          _cast.active &&
+          _cast.index >= _cast.count - 1 &&
+          !_queueing &&
+          DateTime.now().difference(_lastMore) > const Duration(seconds: 15)) {
+        _lastMore = DateTime.now();
+        unawaited(_queueMore(id, null, _queueSeq));
+      }
+      return;
+    }
+    if (e['type'] == 'pip') {
+      inPip.value = e['on'] == true;
+      return;
+    }
+    if (e['type'] == 'web') {
+      final action = e['action'];
+      if (action is String && !_webActions.isClosed) _webActions.add(action);
       return;
     }
     if (e['type'] == 'cast') {
@@ -998,6 +1097,9 @@ class DownloadController extends ChangeNotifier {
     castAdvanced.dispose();
     browseVideoId.dispose();
     openVideo.dispose();
+    _keepTimer?.cancel();
+    inPip.dispose();
+    _webActions.close();
     super.dispose();
   }
 }

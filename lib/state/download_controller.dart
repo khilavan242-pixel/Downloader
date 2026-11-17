@@ -701,11 +701,27 @@ class DownloadController extends ChangeNotifier {
   /// Related videos for [id]: the playlist / Mix, or what the open page lists as "up next".
   Future<List<PlaylistEntry>> _related(String id, String? listUrl) async {
     final source = listUrl ?? 'https://www.youtube.com/watch?v=$id&list=RD$id';
+    // 1. The playlist / Mix.
     try {
       final entries = await _bridge.fetchPlaylist(source);
-      if (entries.isNotEmpty) return entries;
-    } catch (_) {/* fall back to the page */}
-    return _pageRelated[id] ?? const [];
+      if (entries.length > 1) return entries;
+    } catch (_) {/* try the next way */}
+    // 2. What the open YouTube page lists as "up next".
+    final page = _pageRelated[id];
+    if (page != null && page.isNotEmpty) return page;
+    // 3. A search for the video's title (works when YouTube gives no Mix).
+    try {
+      var title = _cast.title ?? '';
+      if (title.trim().isEmpty || title == 'YouTube video') {
+        final one = await _bridge.fetchPlaylist('https://www.youtube.com/watch?v=$id');
+        if (one.isNotEmpty) title = one.first.title;
+      }
+      if (title.trim().isNotEmpty) {
+        final found = await _bridge.fetchPlaylist('ytsearch20:${title.trim()}');
+        if (found.isNotEmpty) return found;
+      }
+    } catch (_) {/* nothing more to try */}
+    return const [];
   }
 
   /// Adds the videos that follow [id] to the TV queue. Returns how many were added.

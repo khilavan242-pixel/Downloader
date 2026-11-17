@@ -47,9 +47,9 @@ class TvPlayerPanel extends StatelessWidget {
     final s = c.cast;
     final target = c.castTarget;
     final onTv = c.castVideoId == videoId;
-    final busy = onTv && (s.status == 'connecting' || s.status == 'loading');
+    final busy = c.castBusy || (onTv && (s.status == 'connecting' || s.status == 'loading'));
     final playing = onTv && (s.status == 'playing' || s.status == 'paused');
-    final stopped = !onTv || !(s.active);
+    final stopped = !busy && (!onTv || !s.active);
 
     return Container(
       color: Colors.black,
@@ -125,7 +125,7 @@ class TvPlayerPanel extends StatelessWidget {
                             () => c.castControl(s.paused ? 'resume' : 'pause'),
                           ),
                           const SizedBox(width: 10),
-                          _ctl(Icons.skip_next_rounded, 34, () => c.castControl('next')),
+                          _ctl(Icons.skip_next_rounded, 34, () => c.castNext()),
                         ],
                       ),
           ),

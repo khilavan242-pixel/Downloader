@@ -96,7 +96,7 @@ class _FloatingCastState extends State<FloatingCast> {
 
   Widget _card(BuildContext context) {
     final s = c.cast;
-    final busy = s.status == 'connecting' || s.status == 'loading';
+    final busy = c.castBusy || s.status == 'connecting' || s.status == 'loading';
     final id = s.uri == null ? null : UrlUtils.videoId(s.uri!);
     return Material(
       color: const Color(0xFF212121),
@@ -257,7 +257,7 @@ class _NowPlaying extends StatelessWidget {
                     IconButton(
                       iconSize: 36,
                       icon: const Icon(Icons.skip_next_rounded),
-                      onPressed: live ? () => c.castControl('next') : null,
+                      onPressed: live ? () => c.castNext() : null,
                     ),
                     const SizedBox(width: 8),
                     IconButton(

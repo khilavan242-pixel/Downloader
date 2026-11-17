@@ -64,7 +64,7 @@ class CastBar extends StatelessWidget {
                   IconButton(
                     tooltip: 'Next',
                     icon: const Icon(Icons.skip_next_rounded),
-                    onPressed: () => controller.castControl('next'),
+                    onPressed: () => controller.castNext(),
                   ),
                 IconButton(
                   tooltip: 'Stop',

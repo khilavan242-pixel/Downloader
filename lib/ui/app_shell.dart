@@ -90,7 +90,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
-      listenable: Listenable.merge([c, c.browseVideoId]),
+      listenable: Listenable.merge([c, c.browseVideoId, c.inPip]),
       builder: (context, _) {
         final active = c.activeCount;
         return PopScope(
@@ -116,12 +116,12 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                     ],
                   ),
                 ),
-                if (_floatingVisible())
+                if (_floatingVisible() && !c.inPip.value)
                   Positioned.fill(child: FloatingCast(controller: c, onOpenVideo: _openVideo)),
               ],
             ),
             // Browse is full screen, like the YouTube app: no Tapnab bar in the way.
-            bottomNavigationBar: _index == _browse
+            bottomNavigationBar: (_index == _browse || c.inPip.value)
                 ? null
                 : _navBar(active),
           ),

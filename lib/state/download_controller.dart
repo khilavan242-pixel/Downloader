@@ -108,20 +108,48 @@ class DownloadController extends ChangeNotifier {
   /// The player is shrunk to the small bar above the bottom of the screen (browse while it plays).
   final ValueNotifier<bool> playerMini = ValueNotifier<bool>(false);
 
-  void openPlayer(String id) {
+  /// How far the small floating player was dragged from its corner (right/bottom).
+  final ValueNotifier<Offset> miniOffset = ValueNotifier<Offset>(Offset.zero);
+
+  /// Title known when the player is opened (shown while the video is still loading).
+  String playerTitle = '';
+
+  void openPlayer(String id, {String? title}) {
     playerMini.value = false;
+    playerTitle = title ?? '';
     playerId.value = id;
+  }
+
+  /// Downloads a YouTube video as MP4 or MP3 with the quality chosen in Settings / Home.
+  Future<void> downloadVideo(String id, MediaKind kind) async {
+    await _start('https://www.youtube.com/watch?v=$id', kind: kind, quality: _settings.qualityFor(kind));
+    _say('${kind.label} download added - see the Downloads tab');
   }
 
   void closePlayer() {
     playerMini.value = false;
+    miniOffset.value = Offset.zero;
     playerId.value = null;
     setWebPlaying(false);
     updatePip(ready: false, playing: false);
   }
 
-  Future<Map<String, dynamic>> resolveStream(String id) =>
-      _bridge.resolveStream('https://www.youtube.com/watch?v=$id');
+  final Map<String, (DateTime, Map<String, dynamic>)> _resolved = {};
+
+  void forgetStream(String id) {
+    _resolved.remove(id);
+    _resolved.remove('$id!');
+  }
+
+  Future<Map<String, dynamic>> resolveStream(String id, {bool legacy = false}) async {
+    final key = legacy ? '$id!' : id;
+    final hit = _resolved[key];
+    if (hit != null && DateTime.now().difference(hit.$1) < const Duration(minutes: 30)) return hit.$2;
+    final r = await _bridge.resolveStream('https://www.youtube.com/watch?v=$id', legacy: legacy);
+    _resolved[key] = (DateTime.now(), r);
+    if (_resolved.length > 12) _resolved.remove(_resolved.keys.first);
+    return r;
+  }
 
   /// Videos that follow [id] (its Mix), for the player's "Up next" list.
   Future<List<PlaylistEntry>> upNext(String id, String title) async {
@@ -559,13 +587,13 @@ class DownloadController extends ChangeNotifier {
     return urls.length;
   }
 
-  Future<void> _start(String url, {String? subfolder, bool? wholePlaylist}) async {
+  Future<void> _start(String url, {String? subfolder, bool? wholePlaylist, MediaKind? kind, QualityOption? quality}) async {
     final id = '${DateTime.now().microsecondsSinceEpoch}-${_idCounter++}';
     final task = DownloadTask(
       id: id,
       url: url,
-      kind: _kind,
-      quality: _quality,
+      kind: kind ?? _kind,
+      quality: quality ?? _quality,
       subfolder: subfolder,
       playlist: (wholePlaylist ?? _playlist) && UrlUtils.hasPlaylist(url),
     );
@@ -576,8 +604,8 @@ class DownloadController extends ChangeNotifier {
       await _bridge.enqueue(
         id: id,
         url: url,
-        kind: _kind,
-        quality: _quality,
+        kind: kind ?? _kind,
+        quality: quality ?? _quality,
         playlist: task.playlist,
         folder: _folder,
         subfolder: subfolder,
@@ -1157,6 +1185,7 @@ class DownloadController extends ChangeNotifier {
     openVideo.dispose();
     playerId.dispose();
     playerMini.dispose();
+    miniOffset.dispose();
     _keepTimer?.cancel();
     inPip.dispose();
     _webActions.close();

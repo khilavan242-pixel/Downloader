@@ -190,7 +190,8 @@ const _watcher = r'''
       if (!m) return;
       e.preventDefault();
       e.stopPropagation();
-      post({t: 'play', id: m[1]});
+      var ttl = (a.getAttribute('aria-label') || a.textContent || '').replace(/\s+/g, ' ').trim();
+      post({t: 'play', id: m[1], title: ttl.slice(0, 160)});
     } catch (x) {}
   }, true);
 
@@ -484,7 +485,8 @@ class BrowsePageState extends State<BrowsePage> with WidgetsBindingObserver {
           final pid = j['id'];
           if (pid is String && c.castTarget == null) {
             _web?.runJavaScript("document.querySelectorAll('video').forEach(function(v){v.pause();})").catchError((_) {});
-            c.openPlayer(pid);
+            final ptitle = j['title'];
+            c.openPlayer(pid, title: ptitle is String ? ptitle : null);
           } else if (pid is String) {
             // On the TV: keep browsing here; the floating window shows what plays.
             c.castPlayNow('https://www.youtube.com/watch?v=$pid');
@@ -535,6 +537,21 @@ class BrowsePageState extends State<BrowsePage> with WidgetsBindingObserver {
     final now = UrlUtils.videoId(u);
     if (c.castTarget != null && now != null && now != before) {
       c.castPlayNow(u, listUrl: _listUrl(u));
+    } else if (c.castTarget == null && now != null && now != before && Uri.tryParse(u)?.path == '/watch') {
+      // The page itself moved to a video (a tap the page handled): play it in Tapnab's player instead.
+      _web?.runJavaScript("document.querySelectorAll('video').forEach(function(v){v.pause();})").catchError((_) {});
+      c.openPlayer(now);
+      _leaveVideoPage();
+    }
+  }
+
+  Future<void> _leaveVideoPage() async {
+    final w = _web;
+    if (w == null) return;
+    if (await w.canGoBack()) {
+      await w.goBack();
+    } else {
+      await w.loadRequest(Uri.parse(_home));
     }
   }
 
@@ -604,7 +621,7 @@ class BrowsePageState extends State<BrowsePage> with WidgetsBindingObserver {
             final onWatch = pageId != null;
             final showPanel = connected && onWatch;
             final showBar = _pivotHidden && !onWatch;
-            final miniLift = (c.playerId.value != null && c.playerMini.value) ? 72.0 : 0.0;
+            final miniLift = (c.playerId.value != null && c.playerMini.value) ? 140.0 : 0.0;
             final clusterBottom =
                 (!_pivotHidden ? 128.0 : (showBar && _barVisible ? 64.0 : 16.0)) + miniLift;
             final canDownload = UrlUtils.isDownloadablePage(_url);

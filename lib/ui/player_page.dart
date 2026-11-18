@@ -1,12 +1,73 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:video_player/video_player.dart';
+import 'package:webview_flutter/webview_flutter.dart';
 
 import '../models/playlist_entry.dart';
+import '../models/quality.dart';
 import '../state/download_controller.dart';
 import '../utils/url_utils.dart';
+
+
+/// Size of the small floating player.
+const double kMiniWidth = 220;
+const double kMiniHeight = 124;
+
+/// Runs inside the small web view under the video: it shows YouTube's own list of
+/// related videos (big thumbnails, like the YouTube app) without YouTube's player.
+const _feedScript = r'''
+(function(){
+  if (window.__tfeed) return;
+  window.__tfeed = true;
+  function post(o){ try { TapnabFeed.postMessage(JSON.stringify(o)); } catch (e) {} }
+  var st = document.createElement('style');
+  st.textContent = '#player-container-id,.player-container,#player,.player-size,ytm-custom-control,.html5-video-player,video,ytm-pivot-bar-renderer,ytm-mobile-topbar-renderer,.mobile-topbar-header,ytm-promoted-sparkles-web-renderer,ytm-app-promo-renderer{display:none!important;height:0!important;min-height:0!important}';
+  document.head.appendChild(st);
+  setInterval(function(){
+    try { document.querySelectorAll('video').forEach(function(v){ v.muted = true; v.pause(); }); } catch (e) {}
+  }, 700);
+  function idOf(h){ var m = /[?&]v=([A-Za-z0-9_-]{11})/.exec(h || ''); return m ? m[1] : null; }
+  function titleOf(a){
+    var t = a.getAttribute('aria-label') || '';
+    if (!t) {
+      var box = a.closest('ytm-video-with-context-renderer,ytm-compact-video-renderer,ytm-media-item,ytm-rich-item-renderer');
+      var h = box ? box.querySelector('h3,.media-item-headline,.compact-media-item-headline') : null;
+      t = (h ? h.textContent : a.textContent) || '';
+    }
+    return t.replace(/\s+/g, ' ').trim().slice(0, 160);
+  }
+  document.addEventListener('click', function(e){
+    try {
+      var a = e.target && e.target.closest ? e.target.closest('a[href*="/watch?v="]') : null;
+      if (!a) return;
+      var id = idOf(a.getAttribute('href'));
+      if (!id) return;
+      e.preventDefault();
+      e.stopPropagation();
+      post({t: 'play', id: id, title: titleOf(a)});
+    } catch (x) {}
+  }, true);
+  var last = '';
+  setInterval(function(){
+    try {
+      var cur = idOf(location.search) || '';
+      var seen = {}, items = [];
+      var as = document.querySelectorAll('a[href*="/watch?v="]');
+      for (var i = 0; i < as.length && items.length < 40; i++) {
+        var id = idOf(as[i].getAttribute('href'));
+        if (!id || id === cur || seen[id]) continue;
+        seen[id] = 1;
+        items.push({id: id, title: titleOf(as[i])});
+      }
+      var msg = JSON.stringify({t: 'related', items: items});
+      if (items.length && msg !== last) { last = msg; TapnabFeed.postMessage(msg); }
+    } catch (x) {}
+  }, 2000);
+})();
+''';
 
 /// Tapnab's own YouTube player. Unlike the web page it never pauses by itself:
 /// it floats over other apps (picture-in-picture) and keeps playing in the
@@ -51,6 +112,8 @@ class _PlayerViewState extends State<PlayerView> {
   String? _preId;
   Future<Map<String, dynamic>?>? _preFuture;
   StreamSubscription<String>? _sub;
+  WebViewController? _feed;
+  String _feedId = '';
 
   @override
   void initState() {
@@ -59,7 +122,7 @@ class _PlayerViewState extends State<PlayerView> {
     c.playerId.addListener(_onIdChange);
     _sub = c.webActions.listen(_onAction);
     final id = c.playerId.value;
-    if (id != null) unawaited(_load(id, pushHistory: false));
+    if (id != null) unawaited(_load(id, pushHistory: false, title: c.playerTitle));
   }
 
   @override
@@ -67,6 +130,7 @@ class _PlayerViewState extends State<PlayerView> {
     c.onPlayerBack = null;
     c.playerId.removeListener(_onIdChange);
     _sub?.cancel();
+    _feed?.removeJavaScriptChannel('TapnabFeed').catchError((_) {});
     _hideTimer?.cancel();
     _flashTimer?.cancel();
     final old = _vc;
@@ -84,7 +148,7 @@ class _PlayerViewState extends State<PlayerView> {
     _queue = [];
     _history.clear();
     _played.clear();
-    unawaited(_load(id, pushHistory: false));
+    unawaited(_load(id, pushHistory: false, title: c.playerTitle));
   }
 
   Future<Map<String, dynamic>?> _tryResolve(String id) async {
@@ -95,7 +159,7 @@ class _PlayerViewState extends State<PlayerView> {
     }
   }
 
-  Future<void> _load(String id, {bool pushHistory = true}) async {
+  Future<void> _load(String id, {bool pushHistory = true, String? title}) async {
     final seq = ++_seq;
     final old = _vc;
     old?.removeListener(_tick);
@@ -107,31 +171,28 @@ class _PlayerViewState extends State<PlayerView> {
       _loading = true;
       _error = null;
       _vc = null;
+      _title = title ?? '';
     });
+    _queue = [];
+    _ensureFeed(id);
     if (old != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) => old.dispose());
     }
     try {
-      Map<String, dynamic>? r;
-      if (_preId == id && _preFuture != null) r = await _preFuture;
+      Map<String, dynamic>? pre;
+      if (_preId == id && _preFuture != null) pre = await _preFuture;
       _preId = null;
       _preFuture = null;
-      r ??= await c.resolveStream(id);
-      final info = r;
-      if (!mounted || seq != _seq) return;
-      final vc = VideoPlayerController.networkUrl(
-        Uri.parse(info['url'] as String),
-        httpHeaders: const {
-          'User-Agent':
-              'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36',
-        },
-      );
+      (VideoPlayerController, Map<String, dynamic>) opened;
       try {
-        await vc.initialize();
+        opened = await _openStream(id, legacy: false, known: pre);
       } catch (_) {
-        await vc.dispose();
-        rethrow;
+        if (!mounted || seq != _seq) return;
+        // The quick way did not work for this video: use the slower, more compatible one.
+        opened = await _openStream(id, legacy: true);
       }
+      final vc = opened.$1;
+      final info = opened.$2;
       if (!mounted || seq != _seq) {
         await vc.dispose();
         return;
@@ -167,21 +228,111 @@ class _PlayerViewState extends State<PlayerView> {
     }
   }
 
+  void _ensureFeed(String id) {
+    if (_feedId == id && _feed != null) return;
+    _feedId = id;
+    var feed = _feed;
+    if (feed == null) {
+      feed = WebViewController()
+        ..setJavaScriptMode(JavaScriptMode.unrestricted)
+        ..setBackgroundColor(const Color(0xFF0F0F0F))
+        ..addJavaScriptChannel('TapnabFeed', onMessageReceived: _onFeedMessage)
+        ..setNavigationDelegate(
+          NavigationDelegate(
+            onNavigationRequest: (request) {
+              final scheme = Uri.tryParse(request.url)?.scheme ?? '';
+              return (scheme == 'http' || scheme == 'https' || scheme == 'about')
+                  ? NavigationDecision.navigate
+                  : NavigationDecision.prevent;
+            },
+            onPageFinished: (_) => _feed?.runJavaScript(_feedScript).catchError((_) {}),
+          ),
+        );
+      _feed = feed;
+    }
+    feed.loadRequest(Uri.parse('https://m.youtube.com/watch?v=$id'));
+  }
+
+  void _onFeedMessage(JavaScriptMessage m) {
+    if (!mounted) return;
+    try {
+      final j = jsonDecode(m.message);
+      if (j is! Map) return;
+      if (j['t'] == 'play') {
+        final id = j['id'];
+        if (id is String) {
+          final t = j['title'];
+          _queue.removeWhere((e) => UrlUtils.videoId(e.url) == id);
+          unawaited(_load(id, title: t is String ? t : null));
+        }
+      } else if (j['t'] == 'related') {
+        final items = j['items'];
+        if (items is! List || _feedId != _id) return;
+        final list = <PlaylistEntry>[];
+        for (final it in items) {
+          if (it is! Map) continue;
+          final id = it['id'];
+          if (id is! String || _played.contains(id)) continue;
+          final t = it['title'];
+          list.add(PlaylistEntry(url: 'https://www.youtube.com/watch?v=$id', title: t is String ? t : ''));
+        }
+        if (list.isEmpty) return;
+        _queue = list;
+        _prefetchFirst();
+      }
+    } catch (_) {/* ignore malformed messages */}
+  }
+
+  void _prefetchFirst() {
+    final first = _queue.isEmpty ? null : UrlUtils.videoId(_queue.first.url);
+    if (first != null && _preId != first) {
+      _preId = first;
+      _preFuture = _tryResolve(first);
+    }
+  }
+
+  Future<(VideoPlayerController, Map<String, dynamic>)> _openStream(
+    String id, {
+    required bool legacy,
+    Map<String, dynamic>? known,
+  }) async {
+    final info = known ?? await c.resolveStream(id, legacy: legacy);
+    final vc = VideoPlayerController.networkUrl(
+      Uri.parse(info['url'] as String),
+      httpHeaders: legacy
+          ? const {
+              'User-Agent':
+                  'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36',
+            }
+          : const <String, String>{},
+    );
+    try {
+      await vc.initialize();
+    } catch (_) {
+      c.forgetStream(id);
+      await vc.dispose();
+      rethrow;
+    }
+    return (vc, info);
+  }
+
+  /// Fallback list when the page gave none (used for auto-play only).
   Future<void> _loadQueue(String id, int seq) async {
+    await Future<void>.delayed(const Duration(seconds: 8));
+    if (!mounted || seq != _seq || _queue.isNotEmpty) return;
     try {
       var list = await c.upNext(id, _title);
       if (list.isEmpty) {
         await Future<void>.delayed(const Duration(seconds: 4));
-        if (!mounted || seq != _seq) return;
+        if (!mounted || seq != _seq || _queue.isNotEmpty) return;
         list = await c.upNext(id, _title);
       }
-      if (!mounted || seq != _seq) return;
-      setState(() {
-        _queue = [
-          for (final e in list)
-            if (!_played.contains(UrlUtils.videoId(e.url))) e,
-        ];
-      });
+      if (!mounted || seq != _seq || _queue.isNotEmpty) return;
+      _queue = [
+        for (final e in list)
+          if (!_played.contains(UrlUtils.videoId(e.url))) e,
+      ];
+      _prefetchFirst();
     } catch (_) {/* the list stays as it was */}
   }
 
@@ -230,7 +381,7 @@ class _PlayerViewState extends State<PlayerView> {
     }
     final e = _queue.removeAt(0);
     final nid = UrlUtils.videoId(e.url);
-    if (nid != null) unawaited(_load(nid));
+    if (nid != null) unawaited(_load(nid, title: e.title));
   }
 
   void _prev() {
@@ -351,7 +502,19 @@ class _PlayerViewState extends State<PlayerView> {
                 padding: const EdgeInsets.all(16),
                 child: Text(_error!, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white70)),
               )
-            : const CircularProgressIndicator(color: Colors.white70),
+            : Stack(
+                fit: StackFit.expand,
+                children: [
+                  if (_id != null)
+                    Image.network(
+                      'https://i.ytimg.com/vi/$_id/mqdefault.jpg',
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+                    ),
+                  const ColoredBox(color: Color(0x66000000)),
+                  const Center(child: CircularProgressIndicator(color: Colors.white70)),
+                ],
+              ),
       );
     }
     final size = vc.value.size;
@@ -388,6 +551,11 @@ class _PlayerViewState extends State<PlayerView> {
                     tooltip: 'Minimize',
                   ),
                   const Spacer(),
+                  IconButton(
+                    onPressed: _id == null ? null : () => c.downloadVideo(_id!, MediaKind.mp4),
+                    icon: const Icon(Icons.download_rounded, color: Colors.white),
+                    tooltip: 'Download',
+                  ),
                   IconButton(
                     onPressed: () => c.enterPip(),
                     icon: const Icon(Icons.picture_in_picture_alt_rounded, color: Colors.white),
@@ -538,36 +706,53 @@ class _PlayerViewState extends State<PlayerView> {
             child: Column(
               children: [
                 AspectRatio(aspectRatio: 16 / 9, child: _videoBox()),
-                Expanded(
-                  child: ListView(
-                    padding: const EdgeInsets.only(bottom: 24),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      _loading && _title.isEmpty ? 'Loading...' : _title,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                  child: Row(
                     children: [
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-                        child: Text(
-                          _loading && _title.isEmpty ? 'Loading...' : _title,
-                          style: Theme.of(context).textTheme.titleMedium,
+                      Expanded(
+                        child: FilledButton.icon(
+                          onPressed: _id == null ? null : () => c.downloadVideo(_id!, MediaKind.mp4),
+                          icon: const Icon(Icons.download_rounded),
+                          label: const Text('Download video'),
                         ),
                       ),
-                      if (_error != null)
-                        Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 16),
-                          child: FilledButton.tonal(
-                            onPressed: () {
-                              final id = _id;
-                              if (id != null) unawaited(_load(id, pushHistory: false));
-                            },
-                            child: const Text('Try again'),
-                          ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: FilledButton.tonalIcon(
+                          onPressed: _id == null ? null : () => c.downloadVideo(_id!, MediaKind.mp3),
+                          icon: const Icon(Icons.music_note_rounded),
+                          label: const Text('Download MP3'),
                         ),
-                      if (_queue.isNotEmpty)
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-                          child: Text('Up next', style: Theme.of(context).textTheme.titleSmall),
-                        ),
-                      for (final e in _queue.take(30)) _queueTile(e),
+                      ),
                     ],
                   ),
+                ),
+                if (_error != null)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                    child: FilledButton.tonal(
+                      onPressed: () {
+                        final id = _id;
+                        if (id != null) unawaited(_load(id, pushHistory: false));
+                      },
+                      child: const Text('Try again'),
+                    ),
+                  ),
+                Expanded(
+                  child: _feed == null ? const SizedBox.shrink() : WebViewWidget(controller: _feed!),
                 ),
               ],
             ),
@@ -577,66 +762,56 @@ class _PlayerViewState extends State<PlayerView> {
     );
   }
 
+  /// The small floating video, like the YouTube app's: tap to open, drag to move, X to close.
   Widget _miniBar() {
     final vc = _vc;
-    final scheme = Theme.of(context).colorScheme;
-    return Material(
-      color: scheme.surfaceContainerHigh,
-      elevation: 6,
-      child: InkWell(
-        onTap: () => c.playerMini.value = false,
-        child: Row(
+    return GestureDetector(
+      onTap: () => c.playerMini.value = false,
+      onPanUpdate: (d) => _dragMini(d.delta),
+      child: Material(
+        color: Colors.black,
+        elevation: 8,
+        borderRadius: BorderRadius.circular(12),
+        clipBehavior: Clip.antiAlias,
+        child: Stack(
+          fit: StackFit.expand,
           children: [
-            SizedBox(width: 114, height: 64, child: ColoredBox(color: Colors.black, child: _picture())),
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 10),
-                child: Text(
-                  _loading && _title.isEmpty ? 'Loading...' : _title,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.bodyMedium,
+            _picture(),
+            if (vc != null)
+              Align(
+                alignment: Alignment.bottomLeft,
+                child: ValueListenableBuilder<VideoPlayerValue>(
+                  valueListenable: vc,
+                  builder: (context, v, _) => IconButton(
+                    onPressed: _toggle,
+                    icon: Icon(
+                      v.isPlaying ? Icons.pause_circle_filled_rounded : Icons.play_circle_fill_rounded,
+                      color: Colors.white,
+                      size: 32,
+                    ),
+                  ),
                 ),
+              ),
+            Align(
+              alignment: Alignment.topRight,
+              child: IconButton(
+                onPressed: _close,
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(Icons.close_rounded, color: Colors.white),
               ),
             ),
-            if (vc != null)
-              ValueListenableBuilder<VideoPlayerValue>(
-                valueListenable: vc,
-                builder: (context, v, _) => IconButton(
-                  onPressed: _toggle,
-                  icon: Icon(v.isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded),
-                ),
-              ),
-            IconButton(onPressed: _close, icon: const Icon(Icons.close_rounded)),
           ],
         ),
       ),
     );
   }
 
-  Widget _queueTile(PlaylistEntry e) {
-    final id = UrlUtils.videoId(e.url);
-    return ListTile(
-      leading: SizedBox(
-        width: 112,
-        height: 63,
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(8),
-          child: id == null
-              ? const ColoredBox(color: Colors.black12)
-              : Image.network(
-                  'https://i.ytimg.com/vi/$id/mqdefault.jpg',
-                  fit: BoxFit.cover,
-                  errorBuilder: (_, __, ___) => const ColoredBox(color: Colors.black12),
-                ),
-        ),
-      ),
-      title: Text(e.title.trim().isEmpty ? 'Video' : e.title, maxLines: 2, overflow: TextOverflow.ellipsis),
-      subtitle: e.duration.isEmpty ? null : Text(e.duration),
-      onTap: () {
-        _queue.remove(e);
-        if (id != null) unawaited(_load(id));
-      },
+  void _dragMini(Offset delta) {
+    final s = MediaQuery.of(context).size;
+    final o = c.miniOffset.value + delta;
+    c.miniOffset.value = Offset(
+      o.dx.clamp(12.0 - (s.width - kMiniWidth), 12.0).toDouble(),
+      o.dy.clamp(-(s.height - kMiniHeight - 200).abs(), 12.0).toDouble(),
     );
   }
 }

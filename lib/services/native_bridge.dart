@@ -154,8 +154,8 @@ class NativeBridge {
 
   /// Turns the video into a floating window now.
   /// Direct address of a YouTube video for the in-app player: title, url, duration (seconds).
-  Future<Map<String, dynamic>> resolveStream(String url) async {
-    final raw = await _methods.invokeMapMethod<dynamic, dynamic>('resolveStream', {'url': url});
+  Future<Map<String, dynamic>> resolveStream(String url, {bool legacy = false}) async {
+    final raw = await _methods.invokeMapMethod<dynamic, dynamic>('resolveStream', {'url': url, 'legacy': legacy});
     return {for (final e in (raw ?? const {}).entries) e.key.toString(): e.value};
   }
 

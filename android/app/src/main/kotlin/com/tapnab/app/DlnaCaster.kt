@@ -152,7 +152,39 @@ object DlnaCaster {
 
     /** Finds a direct, ready-to-play address for a YouTube link. Call off the main thread. */
     /** Title, direct address and length (seconds) of a YouTube video, for the in-app player. */
-    fun resolveForPlayer(pageUrl: String): Triple<String, String, Int> = resolveStream(pageUrl, false)
+    fun resolveForPlayer(pageUrl: String, legacy: Boolean): Triple<String, String, Int> {
+        if (!legacy) {
+            try {
+                return resolveFast(pageUrl)
+            } catch (e: Exception) {
+                // fall back to the slower, more widely working way below
+            }
+        }
+        return resolveStream(pageUrl, false)
+    }
+
+    /** Quick way: the iOS client lists a streaming playlist (picture + sound) without downloading YouTube's player code. */
+    private fun resolveFast(pageUrl: String): Triple<String, String, Int> {
+        TapnabApp.awaitReady()
+        val req = com.yausername.youtubedl_android.YoutubeDLRequest(pageUrl).apply {
+            addOption("--no-playlist")
+            addOption("--no-warnings")
+            addOption("--extractor-args", "youtube:player_client=ios")
+            addOption(
+                "-f",
+                "best[protocol^=m3u8][height<=720]/best[protocol^=m3u8]/best[acodec!=none][vcodec!=none][height<=720]",
+            )
+            addOption("--print", "%(title)s\t%(duration)s\t%(url)s")
+        }
+        val out = com.yausername.youtubedl_android.YoutubeDL.getInstance().execute(req, null) { _, _, _ -> }.out
+        val line = out.lineSequence().map { it.trim() }.lastOrNull { it.contains("http") }
+            ?: throw IOException("Could not get a playable address for this video.")
+        val parts = line.split('\t', limit = 3)
+        if (parts.size < 3 || !parts[2].startsWith("http")) {
+            throw IOException("Could not get a playable address for this video.")
+        }
+        return Triple(parts[0], parts[2], parts[1].toDoubleOrNull()?.toInt() ?: 0)
+    }
 
     private fun resolveStream(pageUrl: String, audioOnly: Boolean): Triple<String, String, Int> {
         TapnabApp.awaitReady()
@@ -166,7 +198,8 @@ object DlnaCaster {
                 addOption(
                     "-f",
                     "best[ext=mp4][vcodec^=avc1][acodec!=none][height<=720]/" +
-                        "best[ext=mp4][acodec!=none][height<=720]/best[ext=mp4][acodec!=none]/best[acodec!=none]",
+                        "best[ext=mp4][acodec!=none][height<=720]/best[ext=mp4][acodec!=none]/best[acodec!=none]/" +
+                        "best[height<=720]/best",
                 )
             }
             addOption("--print", "%(title)s\t%(duration)s\t%(url)s")

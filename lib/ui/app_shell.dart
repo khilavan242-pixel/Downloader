@@ -95,7 +95,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
-      listenable: Listenable.merge([c, c.browseVideoId, c.inPip, c.playerId, c.playerMini]),
+      listenable: Listenable.merge([c, c.browseVideoId, c.inPip, c.playerId, c.playerMini, c.miniOffset]),
       builder: (context, _) {
         final active = c.activeCount;
         return PopScope(
@@ -121,15 +121,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                     ],
                   ),
                 ),
-                if (c.playerId.value != null)
-                  Positioned(
-                    left: 0,
-                    right: 0,
-                    top: (c.playerMini.value && !c.inPip.value) ? null : 0,
-                    bottom: (c.playerMini.value && !c.inPip.value) ? (_index == _browse ? 64.0 : 0.0) : 0,
-                    height: (c.playerMini.value && !c.inPip.value) ? 64.0 : null,
-                    child: PlayerView(controller: c),
-                  ),
+                if (c.playerId.value != null) _playerSlot(context),
                 if (_floatingVisible() && !c.inPip.value && c.playerId.value == null)
                   Positioned.fill(child: FloatingCast(controller: c, onOpenVideo: _openVideo)),
               ],
@@ -152,6 +144,26 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     final shown = c.browseVideoId.value;
     if (_index == _browse && shown != null && shown == c.castVideoId) return false;
     return true;
+  }
+
+  /// Where the player sits: the whole screen, or the small floating video in a corner.
+  Widget _playerSlot(BuildContext context) {
+    final mini = c.playerMini.value && !c.inPip.value;
+    if (!mini) {
+      return Positioned(left: 0, right: 0, top: 0, bottom: 0, child: PlayerView(controller: c));
+    }
+    final size = MediaQuery.of(context).size;
+    final base = _index == _browse ? 76.0 : 12.0;
+    final o = c.miniOffset.value;
+    final right = (12.0 - o.dx).clamp(0.0, (size.width - kMiniWidth).abs()).toDouble();
+    final bottom = (base - o.dy).clamp(0.0, (size.height - kMiniHeight - 120).abs()).toDouble();
+    return Positioned(
+      right: right,
+      bottom: bottom,
+      width: kMiniWidth,
+      height: kMiniHeight,
+      child: PlayerView(controller: c),
+    );
   }
 
   Widget _navBar(int active) {

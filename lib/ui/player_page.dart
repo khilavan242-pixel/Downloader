@@ -114,6 +114,11 @@ class _PlayerViewState extends State<PlayerView> {
   StreamSubscription<String>? _sub;
   WebViewController? _feed;
   String _feedId = '';
+  double _speed = 1.0;
+  String _lastLoadedId = '';
+  bool _locked = false;
+  bool _lockHint = false;
+  Timer? _lockTimer;
 
   @override
   void initState() {
@@ -133,6 +138,7 @@ class _PlayerViewState extends State<PlayerView> {
     _feed?.removeJavaScriptChannel('TapnabFeed').catchError((_) {});
     _hideTimer?.cancel();
     _flashTimer?.cancel();
+    _lockTimer?.cancel();
     final old = _vc;
     _vc = null;
     old?.removeListener(_tick);
@@ -159,7 +165,7 @@ class _PlayerViewState extends State<PlayerView> {
     }
   }
 
-  Future<void> _load(String id, {bool pushHistory = true, String? title}) async {
+  Future<void> _load(String id, {bool pushHistory = true, String? title, Duration? resume}) async {
     final seq = ++_seq;
     final old = _vc;
     old?.removeListener(_tick);
@@ -173,7 +179,8 @@ class _PlayerViewState extends State<PlayerView> {
       _vc = null;
       _title = title ?? '';
     });
-    _queue = [];
+    if (c.playerListId == null && id != _lastLoadedId) _queue = [];
+    _lastLoadedId = id;
     _ensureFeed(id);
     if (old != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) => old.dispose());
@@ -203,6 +210,8 @@ class _PlayerViewState extends State<PlayerView> {
         _title = (info['title'] as String?) ?? '';
         _loading = false;
       });
+      await vc.setPlaybackSpeed(_speed);
+      if (resume != null) await vc.seekTo(resume);
       await vc.play();
       _skips = 0;
       _auto = false;
@@ -210,7 +219,7 @@ class _PlayerViewState extends State<PlayerView> {
       c.setWebPlaying(true);
       c.updatePip(ready: true, playing: true);
       _showControls();
-      if (_queue.length < 3) unawaited(_loadQueue(id, seq));
+      if (_queue.length < 3 || c.audioMode.value) unawaited(_loadQueue(id, seq));
     } catch (e) {
       if (!mounted || seq != _seq) return;
       if (_auto && _skips < 3) {
@@ -229,8 +238,10 @@ class _PlayerViewState extends State<PlayerView> {
   }
 
   void _ensureFeed(String id) {
-    if (_feedId == id && _feed != null) return;
-    _feedId = id;
+    if (c.audioMode.value) return; // sound only: do not load the video list (saves data)
+    final key = '$id|${c.playerListId}';
+    if (_feedId == key && _feed != null) return;
+    _feedId = key;
     var feed = _feed;
     if (feed == null) {
       feed = WebViewController()
@@ -250,7 +261,8 @@ class _PlayerViewState extends State<PlayerView> {
         );
       _feed = feed;
     }
-    feed.loadRequest(Uri.parse('https://m.youtube.com/watch?v=$id'));
+    final list = c.playerListId;
+    feed.loadRequest(Uri.parse('https://m.youtube.com/watch?v=$id${list == null ? '' : '&list=$list'}'));
   }
 
   void _onFeedMessage(JavaScriptMessage m) {
@@ -267,7 +279,7 @@ class _PlayerViewState extends State<PlayerView> {
         }
       } else if (j['t'] == 'related') {
         final items = j['items'];
-        if (items is! List || _feedId != _id) return;
+        if (items is! List || c.playerListId != null || !_feedId.startsWith('$_id|')) return;
         final list = <PlaylistEntry>[];
         for (final it in items) {
           if (it is! Map) continue;
@@ -316,22 +328,34 @@ class _PlayerViewState extends State<PlayerView> {
     return (vc, info);
   }
 
-  /// Fallback list when the page gave none (used for auto-play only).
+  /// The playlist ("Play all"), or a fallback list when the page gave none.
   Future<void> _loadQueue(String id, int seq) async {
-    await Future<void>.delayed(const Duration(seconds: 8));
-    if (!mounted || seq != _seq || _queue.isNotEmpty) return;
-    try {
-      var list = await c.upNext(id, _title);
-      if (list.isEmpty) {
-        await Future<void>.delayed(const Duration(seconds: 4));
-        if (!mounted || seq != _seq || _queue.isNotEmpty) return;
-        list = await c.upNext(id, _title);
-      }
+    final listMode = c.playerListId != null;
+    if (!listMode && !c.audioMode.value) {
+      await Future<void>.delayed(const Duration(seconds: 8));
       if (!mounted || seq != _seq || _queue.isNotEmpty) return;
-      _queue = [
-        for (final e in list)
-          if (!_played.contains(UrlUtils.videoId(e.url))) e,
-      ];
+    }
+    try {
+      List<PlaylistEntry> list;
+      if (listMode) {
+        final all = await c.listEntries(id);
+        final at = all.indexWhere((e) => UrlUtils.videoId(e.url) == id);
+        list = at >= 0 ? all.sublist(at + 1) : all;
+      } else {
+        list = await c.upNext(id, _title);
+        if (list.isEmpty) {
+          await Future<void>.delayed(const Duration(seconds: 4));
+          if (!mounted || seq != _seq || _queue.isNotEmpty) return;
+          list = await c.upNext(id, _title);
+        }
+      }
+      if (!mounted || seq != _seq || (_queue.isNotEmpty && !listMode)) return;
+      setState(() {
+        _queue = [
+          for (final e in list)
+            if (!_played.contains(UrlUtils.videoId(e.url))) e,
+        ];
+      });
       _prefetchFirst();
     } catch (_) {/* the list stays as it was */}
   }
@@ -438,6 +462,7 @@ class _PlayerViewState extends State<PlayerView> {
   }
 
   void _showControls() {
+    if (_locked) return;
     _hideTimer?.cancel();
     if (!_controls && mounted) setState(() => _controls = true);
     _hideTimer = Timer(const Duration(seconds: 3), () {
@@ -517,6 +542,7 @@ class _PlayerViewState extends State<PlayerView> {
               ),
       );
     }
+    if (c.audioMode.value) return _audioArt();
     final size = vc.value.size;
     if (_cover && size.width > 0 && size.height > 0) {
       return SizedBox.expand(
@@ -528,6 +554,185 @@ class _PlayerViewState extends State<PlayerView> {
       );
     }
     return Center(child: AspectRatio(aspectRatio: vc.value.aspectRatio, child: VideoPlayer(vc)));
+  }
+
+  /// Sound-only mode: the picture is not downloaded, show the video's cover instead.
+  Widget _audioArt() {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        if (_id != null)
+          Image.network(
+            'https://i.ytimg.com/vi/$_id/mqdefault.jpg',
+            fit: BoxFit.cover,
+            errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+          ),
+        const ColoredBox(color: Color(0x99000000)),
+        const Center(child: Icon(Icons.headphones_rounded, color: Colors.white70, size: 40)),
+      ],
+    );
+  }
+
+  Widget _audioList() {
+    return ListView(
+      padding: const EdgeInsets.only(bottom: 24),
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+          child: Text(
+            'Audio mode: sound only. No pictures are downloaded, so it uses much less data and battery.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ),
+        if (_queue.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+            child: Text('Up next', style: Theme.of(context).textTheme.titleSmall),
+          ),
+        for (final e in _queue.take(40))
+          ListTile(
+            dense: true,
+            leading: const Icon(Icons.music_note_rounded),
+            title: Text(e.title.trim().isEmpty ? 'Video' : e.title, maxLines: 2, overflow: TextOverflow.ellipsis),
+            onTap: () {
+              final id = UrlUtils.videoId(e.url);
+              _queue.remove(e);
+              if (id != null) unawaited(_load(id, title: e.title));
+            },
+          ),
+      ],
+    );
+  }
+
+  // ---- Settings, like the YouTube app ----------------------------------------
+
+  Future<void> _reloadHere() async {
+    final id = _id;
+    if (id == null) return;
+    final pos = _vc?.value.position;
+    _preId = null;
+    _preFuture = null;
+    await _load(id, pushHistory: false, title: _title, resume: pos);
+  }
+
+  String _heightLabel(int h) => h >= 720 ? 'Auto (720p)' : (h == 360 ? '360p (data saver)' : '${h}p');
+
+  Future<void> _openSettings() async {
+    final ctx = context;
+    await showModalBottomSheet<void>(
+      context: ctx,
+      showDragHandle: true,
+      builder: (sheet) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.tune_rounded),
+              title: const Text('Quality'),
+              trailing: Text(c.audioMode.value ? 'Sound only' : _heightLabel(c.playerHeight.value)),
+              onTap: () {
+                Navigator.pop(sheet);
+                _pickQuality();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.slow_motion_video_rounded),
+              title: const Text('Playback speed'),
+              trailing: Text(_speed == 1.0 ? 'Normal' : '${_speed}x'),
+              onTap: () {
+                Navigator.pop(sheet);
+                _pickSpeed();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.lock_outline_rounded),
+              title: const Text('Lock screen'),
+              onTap: () {
+                Navigator.pop(sheet);
+                setState(() {
+                  _locked = true;
+                  _lockHint = false;
+                  _controls = false;
+                });
+              },
+            ),
+            SwitchListTile(
+              secondary: const Icon(Icons.headphones_rounded),
+              title: const Text('Audio mode (MP3 player)'),
+              subtitle: const Text('Sound only. Saves data and battery.'),
+              value: c.audioMode.value,
+              onChanged: (on) {
+                Navigator.pop(sheet);
+                c.setAudioMode(on);
+                if (on) {
+                  _feed?.loadRequest(Uri.parse('about:blank'));
+                  _feed?.removeJavaScriptChannel('TapnabFeed').catchError((_) {});
+                  _feed = null;
+                  _feedId = '';
+                } else if (_id != null) {
+                  _ensureFeed(_id!);
+                }
+                _reloadHere();
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _pickQuality() async {
+    const options = [720, 480, 360, 240, 144];
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheet) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final h in options)
+              ListTile(
+                title: Text(_heightLabel(h)),
+                trailing: (!c.audioMode.value && c.playerHeight.value == h) ? const Icon(Icons.check_rounded) : null,
+                onTap: () {
+                  Navigator.pop(sheet);
+                  c.setPlayerHeight(h);
+                  if (c.audioMode.value) c.setAudioMode(false);
+                  if (_id != null) _ensureFeed(_id!);
+                  _reloadHere();
+                },
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _pickSpeed() async {
+    const options = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheet) => SafeArea(
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final v in options)
+                ListTile(
+                  title: Text(v == 1.0 ? 'Normal' : '${v}x'),
+                  trailing: _speed == v ? const Icon(Icons.check_rounded) : null,
+                  onTap: () {
+                    Navigator.pop(sheet);
+                    setState(() => _speed = v);
+                    _vc?.setPlaybackSpeed(v);
+                  },
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _controlsLayer() {
@@ -555,6 +760,11 @@ class _PlayerViewState extends State<PlayerView> {
                     onPressed: _id == null ? null : () => c.downloadVideo(_id!, MediaKind.mp4),
                     icon: const Icon(Icons.download_rounded, color: Colors.white),
                     tooltip: 'Download',
+                  ),
+                  IconButton(
+                    onPressed: _openSettings,
+                    icon: const Icon(Icons.settings_rounded, color: Colors.white),
+                    tooltip: 'Settings',
                   ),
                   IconButton(
                     onPressed: () => c.enterPip(),
@@ -669,6 +879,31 @@ class _PlayerViewState extends State<PlayerView> {
                 onDoubleTap: () => _seekBy(_tapX < _boxWidth / 2 ? -10 : 30),
               ),
               if (_vc != null) _controlsLayer(),
+              if (_locked)
+                Positioned.fill(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () {
+                      setState(() => _lockHint = true);
+                      _lockTimer?.cancel();
+                      _lockTimer = Timer(const Duration(seconds: 2), () {
+                        if (mounted) setState(() => _lockHint = false);
+                      });
+                    },
+                    child: Center(
+                      child: _lockHint
+                          ? IconButton.filledTonal(
+                              onPressed: () => setState(() {
+                                _locked = false;
+                                _lockHint = false;
+                              }),
+                              icon: const Icon(Icons.lock_open_rounded),
+                              tooltip: 'Unlock',
+                            )
+                          : const SizedBox.shrink(),
+                    ),
+                  ),
+                ),
               if (_flash.isNotEmpty)
                 Center(
                   child: DecoratedBox(
@@ -752,7 +987,7 @@ class _PlayerViewState extends State<PlayerView> {
                     ),
                   ),
                 Expanded(
-                  child: _feed == null ? const SizedBox.shrink() : WebViewWidget(controller: _feed!),
+                  child: (c.audioMode.value || _feed == null) ? _audioList() : WebViewWidget(controller: _feed!),
                 ),
               ],
             ),

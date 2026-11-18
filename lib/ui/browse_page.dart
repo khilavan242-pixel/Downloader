@@ -97,7 +97,7 @@ const _watcher = r'''
   };
 
   // Scroll direction (hides / shows the bottom bar).
-  var lastY = {}, lastDir = 0, lastHref = location.href;
+  var lastY = {}, lastDir = 0, lastHref = location.href, navHref = location.href;
   window.addEventListener('scroll', function(e){
     try {
       if (location.href !== lastHref) { lastHref = location.href; lastDir = 0; }
@@ -191,7 +191,7 @@ const _watcher = r'''
       e.preventDefault();
       e.stopPropagation();
       var ttl = (a.getAttribute('aria-label') || a.textContent || '').replace(/\s+/g, ' ').trim();
-      post({t: 'play', id: m[1], title: ttl.slice(0, 160)});
+      post({t: 'play', id: m[1], title: ttl.slice(0, 160), href: a.getAttribute('href') || ''});
     } catch (x) {}
   }, true);
 
@@ -241,6 +241,7 @@ const _watcher = r'''
   var lastRel = '';
   setInterval(function(){
     try {
+      if (location.href !== navHref) { navHref = location.href; post({t: 'nav', href: navHref}); }
       if (!window.__tapnabStyled && document.querySelector('ytm-pivot-bar-renderer')) {
         var st = document.createElement('style');
         st.textContent = 'ytm-pivot-bar-renderer{display:none!important}';
@@ -481,12 +482,20 @@ class BrowsePageState extends State<BrowsePage> with WidgetsBindingObserver {
     try {
       final j = jsonDecode(m.message) as Map<String, dynamic>;
       switch (j['t']) {
+        case 'nav':
+          final h = j['href'];
+          if (h is String && mounted) _onUrl(h);
         case 'play':
           final pid = j['id'];
+          final href = j['href'];
+          String? listId;
+          if (href is String && href.isNotEmpty) {
+            listId = Uri.parse('https://m.youtube.com').resolve(href).queryParameters['list'];
+          }
           if (pid is String && c.castTarget == null) {
             _web?.runJavaScript("document.querySelectorAll('video').forEach(function(v){v.pause();})").catchError((_) {});
             final ptitle = j['title'];
-            c.openPlayer(pid, title: ptitle is String ? ptitle : null);
+            c.openPlayer(pid, title: ptitle is String ? ptitle : null, listId: listId);
           } else if (pid is String) {
             // On the TV: keep browsing here; the floating window shows what plays.
             c.castPlayNow('https://www.youtube.com/watch?v=$pid');
@@ -540,7 +549,7 @@ class BrowsePageState extends State<BrowsePage> with WidgetsBindingObserver {
     } else if (c.castTarget == null && now != null && now != before && Uri.tryParse(u)?.path == '/watch') {
       // The page itself moved to a video (a tap the page handled): play it in Tapnab's player instead.
       _web?.runJavaScript("document.querySelectorAll('video').forEach(function(v){v.pause();})").catchError((_) {});
-      c.openPlayer(now);
+      c.openPlayer(now, listId: Uri.tryParse(u)?.queryParameters['list']);
       _leaveVideoPage();
     }
   }

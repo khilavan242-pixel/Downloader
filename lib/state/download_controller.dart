@@ -114,8 +114,9 @@ class DownloadController extends ChangeNotifier {
   /// Title known when the player is opened (shown while the video is still loading).
   String playerTitle = '';
 
-  void openPlayer(String id, {String? title}) {
+  void openPlayer(String id, {String? title, String? listId}) {
     playerMini.value = false;
+    playerListId = (listId == null || listId.isEmpty) ? null : listId;
     playerTitle = title ?? '';
     playerId.value = id;
   }
@@ -129,6 +130,7 @@ class DownloadController extends ChangeNotifier {
   void closePlayer() {
     playerMini.value = false;
     miniOffset.value = Offset.zero;
+    playerListId = null;
     playerId.value = null;
     setWebPlaying(false);
     updatePip(ready: false, playing: false);
@@ -136,19 +138,50 @@ class DownloadController extends ChangeNotifier {
 
   final Map<String, (DateTime, Map<String, dynamic>)> _resolved = {};
 
-  void forgetStream(String id) {
-    _resolved.remove(id);
-    _resolved.remove('$id!');
-  }
+  void forgetStream(String id) => _resolved.removeWhere((k, _) => k.startsWith('$id|'));
 
   Future<Map<String, dynamic>> resolveStream(String id, {bool legacy = false}) async {
-    final key = legacy ? '$id!' : id;
+    final audio = audioMode.value;
+    final height = playerHeight.value;
+    final key = '$id|$legacy|$audio|$height';
     final hit = _resolved[key];
     if (hit != null && DateTime.now().difference(hit.$1) < const Duration(minutes: 30)) return hit.$2;
-    final r = await _bridge.resolveStream('https://www.youtube.com/watch?v=$id', legacy: legacy);
+    final r = await _bridge.resolveStream(
+      'https://www.youtube.com/watch?v=$id',
+      legacy: legacy,
+      audio: audio,
+      height: height,
+    );
     _resolved[key] = (DateTime.now(), r);
     if (_resolved.length > 12) _resolved.remove(_resolved.keys.first);
     return r;
+  }
+
+  /// Player choices (kept between runs): picture height and sound-only mode.
+  late final ValueNotifier<int> playerHeight = ValueNotifier<int>(_settings.playerHeight);
+  late final ValueNotifier<bool> audioMode = ValueNotifier<bool>(_settings.audioMode);
+
+  void setPlayerHeight(int h) {
+    _settings.playerHeight = h;
+    playerHeight.value = h;
+  }
+
+  void setAudioMode(bool on) {
+    _settings.audioMode = on;
+    audioMode.value = on;
+  }
+
+  /// The playlist the player was opened from ("Play all"), or null.
+  String? playerListId;
+
+  /// The playlist's videos (in order), for the player's queue.
+  Future<List<PlaylistEntry>> listEntries(String id) async {
+    final l = playerListId;
+    if (l == null) return const [];
+    final url = l.startsWith('RD')
+        ? 'https://www.youtube.com/watch?v=$id&list=$l'
+        : 'https://www.youtube.com/playlist?list=$l';
+    return _bridge.fetchPlaylist(url);
   }
 
   /// Videos that follow [id] (its Mix), for the player's "Up next" list.
@@ -1186,6 +1219,8 @@ class DownloadController extends ChangeNotifier {
     playerId.dispose();
     playerMini.dispose();
     miniOffset.dispose();
+    playerHeight.dispose();
+    audioMode.dispose();
     _keepTimer?.cancel();
     inPip.dispose();
     _webActions.close();

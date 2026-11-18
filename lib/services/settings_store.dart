@@ -54,6 +54,16 @@ class SettingsStore {
   bool get playlist => _prefs.getBool(_kPlaylist) ?? false;
   set playlist(bool v) => _prefs.setBool(_kPlaylist, v);
 
+  // ---- In-app player ---------------------------------------------------------
+
+  /// Highest picture height the player asks for (360 = data saver).
+  int get playerHeight => _prefs.getInt('player_height') ?? 720;
+  set playerHeight(int v) => _prefs.setInt('player_height', v);
+
+  /// Sound only: no picture is downloaded (saves data and battery).
+  bool get audioMode => _prefs.getBool('player_audio') ?? false;
+  set audioMode(bool v) => _prefs.setBool('player_audio', v);
+
   // ---- Settings page ----------------------------------------------------------
 
   /// `original`, `clean` or `short`.

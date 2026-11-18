@@ -152,19 +152,20 @@ object DlnaCaster {
 
     /** Finds a direct, ready-to-play address for a YouTube link. Call off the main thread. */
     /** Title, direct address and length (seconds) of a YouTube video, for the in-app player. */
-    fun resolveForPlayer(pageUrl: String, legacy: Boolean): Triple<String, String, Int> {
+    fun resolveForPlayer(pageUrl: String, legacy: Boolean, audioOnly: Boolean, maxHeight: Int): Triple<String, String, Int> {
+        if (audioOnly) return resolveStream(pageUrl, true)
         if (!legacy) {
             try {
-                return resolveFast(pageUrl)
+                return resolveFast(pageUrl, maxHeight)
             } catch (e: Exception) {
                 // fall back to the slower, more widely working way below
             }
         }
-        return resolveStream(pageUrl, false)
+        return resolveStream(pageUrl, false, maxHeight)
     }
 
     /** Quick way: the iOS client lists a streaming playlist (picture + sound) without downloading YouTube's player code. */
-    private fun resolveFast(pageUrl: String): Triple<String, String, Int> {
+    private fun resolveFast(pageUrl: String, maxHeight: Int): Triple<String, String, Int> {
         TapnabApp.awaitReady()
         val req = com.yausername.youtubedl_android.YoutubeDLRequest(pageUrl).apply {
             addOption("--no-playlist")
@@ -172,7 +173,7 @@ object DlnaCaster {
             addOption("--extractor-args", "youtube:player_client=ios")
             addOption(
                 "-f",
-                "best[protocol^=m3u8][height<=720]/best[protocol^=m3u8]/best[acodec!=none][vcodec!=none][height<=720]",
+                "best[protocol^=m3u8][height<=$maxHeight]/best[protocol^=m3u8]/best[acodec!=none][vcodec!=none][height<=$maxHeight]",
             )
             addOption("--print", "%(title)s\t%(duration)s\t%(url)s")
         }
@@ -186,7 +187,7 @@ object DlnaCaster {
         return Triple(parts[0], parts[2], parts[1].toDoubleOrNull()?.toInt() ?: 0)
     }
 
-    private fun resolveStream(pageUrl: String, audioOnly: Boolean): Triple<String, String, Int> {
+    private fun resolveStream(pageUrl: String, audioOnly: Boolean, maxHeight: Int = 720): Triple<String, String, Int> {
         TapnabApp.awaitReady()
         val req = com.yausername.youtubedl_android.YoutubeDLRequest(pageUrl).apply {
             addOption("--no-playlist")
@@ -197,9 +198,9 @@ object DlnaCaster {
                 // One file with picture and sound together (TVs cannot join two streams).
                 addOption(
                     "-f",
-                    "best[ext=mp4][vcodec^=avc1][acodec!=none][height<=720]/" +
-                        "best[ext=mp4][acodec!=none][height<=720]/best[ext=mp4][acodec!=none]/best[acodec!=none]/" +
-                        "best[height<=720]/best",
+                    "best[ext=mp4][vcodec^=avc1][acodec!=none][height<=$maxHeight]/" +
+                        "best[ext=mp4][acodec!=none][height<=$maxHeight]/best[ext=mp4][acodec!=none]/best[acodec!=none]/" +
+                        "best[height<=$maxHeight]/best",
                 )
             }
             addOption("--print", "%(title)s\t%(duration)s\t%(url)s")

@@ -380,7 +380,12 @@ class MainActivity : FlutterActivity() {
                 }
                 thread(name = "resolve-stream") {
                     try {
-                        val r = DlnaCaster.resolveForPlayer(url, call.argument<Boolean>("legacy") == true)
+                        val r = DlnaCaster.resolveForPlayer(
+                            url,
+                            call.argument<Boolean>("legacy") == true,
+                            call.argument<Boolean>("audio") == true,
+                            call.argument<Int>("height") ?: 720,
+                        )
                         main.post { result.success(mapOf("title" to r.first, "url" to r.second, "duration" to r.third)) }
                     } catch (e: Throwable) {
                         main.post { result.error("resolve_failed", e.message ?: "Could not open this video", null) }

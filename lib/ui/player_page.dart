@@ -573,10 +573,37 @@ class _PlayerViewState extends State<PlayerView> {
     );
   }
 
+  Widget _actionChip(IconData icon, String label, VoidCallback onTap, {bool selected = false}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+      child: selected
+          ? FilledButton.icon(onPressed: onTap, icon: Icon(icon, size: 18), label: Text(label))
+          : FilledButton.tonalIcon(onPressed: onTap, icon: Icon(icon, size: 18), label: Text(label)),
+    );
+  }
+
+  void _toggleAudio() {
+    final on = !c.audioMode.value;
+    c.setAudioMode(on);
+    if (on) {
+      _feed?.loadRequest(Uri.parse('about:blank'));
+      _feed?.removeJavaScriptChannel('TapnabFeed').catchError((_) {});
+      _feed = null;
+      _feedId = '';
+    } else if (_id != null) {
+      _ensureFeed(_id!);
+    }
+    _reloadHere();
+  }
+
   Widget _audioList() {
     return ListView(
       padding: const EdgeInsets.only(bottom: 24),
       children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+          child: Text(_title, style: Theme.of(context).textTheme.titleMedium),
+        ),
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
           child: Text(
@@ -661,18 +688,9 @@ class _PlayerViewState extends State<PlayerView> {
               title: const Text('Audio mode (MP3 player)'),
               subtitle: const Text('Sound only. Saves data and battery.'),
               value: c.audioMode.value,
-              onChanged: (on) {
+              onChanged: (_) {
                 Navigator.pop(sheet);
-                c.setAudioMode(on);
-                if (on) {
-                  _feed?.loadRequest(Uri.parse('about:blank'));
-                  _feed?.removeJavaScriptChannel('TapnabFeed').catchError((_) {});
-                  _feed = null;
-                  _feedId = '';
-                } else if (_id != null) {
-                  _ensureFeed(_id!);
-                }
-                _reloadHere();
+                _toggleAudio();
               },
             ),
           ],
@@ -941,37 +959,29 @@ class _PlayerViewState extends State<PlayerView> {
             child: Column(
               children: [
                 AspectRatio(aspectRatio: 16 / 9, child: _videoBox()),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
-                  child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text(
-                      _loading && _title.isEmpty ? 'Loading...' : _title,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                  child: Row(
+                SizedBox(
+                  height: 48,
+                  child: ListView(
+                    scrollDirection: Axis.horizontal,
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
                     children: [
-                      Expanded(
-                        child: FilledButton.icon(
-                          onPressed: _id == null ? null : () => c.downloadVideo(_id!, MediaKind.mp4),
-                          icon: const Icon(Icons.download_rounded),
-                          label: const Text('Download video'),
-                        ),
+                      _actionChip(
+                        Icons.download_rounded,
+                        'Video',
+                        () => _id == null ? null : c.downloadVideo(_id!, MediaKind.mp4),
                       ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: FilledButton.tonalIcon(
-                          onPressed: _id == null ? null : () => c.downloadVideo(_id!, MediaKind.mp3),
-                          icon: const Icon(Icons.music_note_rounded),
-                          label: const Text('Download MP3'),
-                        ),
+                      _actionChip(
+                        Icons.music_note_rounded,
+                        'MP3',
+                        () => _id == null ? null : c.downloadVideo(_id!, MediaKind.mp3),
                       ),
+                      _actionChip(
+                        Icons.headphones_rounded,
+                        c.audioMode.value ? 'Audio mode: on' : 'Audio mode',
+                        _toggleAudio,
+                        selected: c.audioMode.value,
+                      ),
+                      _actionChip(Icons.settings_rounded, 'Settings', _openSettings),
                     ],
                   ),
                 ),

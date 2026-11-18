@@ -88,7 +88,6 @@ class _PlayerViewState extends State<PlayerView> {
   String? _id;
   String _title = '';
   String? _error;
-  bool _loading = true;
   int _seq = 0;
 
   List<PlaylistEntry> _queue = [];
@@ -174,7 +173,6 @@ class _PlayerViewState extends State<PlayerView> {
     _played.add(id);
     _advancing = false;
     setState(() {
-      _loading = true;
       _error = null;
       _vc = null;
       _title = title ?? '';
@@ -208,7 +206,6 @@ class _PlayerViewState extends State<PlayerView> {
       setState(() {
         _vc = vc;
         _title = (info['title'] as String?) ?? '';
-        _loading = false;
       });
       await vc.setPlaybackSpeed(_speed);
       if (resume != null) await vc.seekTo(resume);
@@ -230,7 +227,6 @@ class _PlayerViewState extends State<PlayerView> {
       }
       _auto = false;
       setState(() {
-        _loading = false;
         final why = e.toString().replaceAll('\n', ' ');
         _error = 'Could not play this video. ${why.length > 140 ? why.substring(0, 140) : why}';
       });

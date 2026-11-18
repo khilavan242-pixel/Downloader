@@ -365,6 +365,22 @@ class MainActivity : FlutterActivity() {
                 result.success(null)
             }
 
+            "playerMedia" -> {
+                try {
+                    PlaybackService.update(
+                        applicationContext,
+                        call.argument<String>("id"),
+                        call.argument<String>("title") ?: "",
+                        call.argument<Boolean>("playing") == true,
+                        (call.argument<Number>("position") ?: 0).toLong(),
+                        (call.argument<Number>("duration") ?: 0).toLong(),
+                    )
+                } catch (e: Exception) {
+                    // best effort
+                }
+                result.success(null)
+            }
+
             "setPip" -> {
                 pipReady = call.argument<Boolean>("ready") == true
                 pipPlaying = call.argument<Boolean>("playing") == true

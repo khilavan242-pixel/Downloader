@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -24,11 +25,43 @@ const _feedScript = r'''
   window.__tfeed = true;
   function post(o){ try { TapnabFeed.postMessage(JSON.stringify(o)); } catch (e) {} }
   var st = document.createElement('style');
-  st.textContent = '#player-container-id,.player-container,#player,.player-size,ytm-custom-control,.html5-video-player,video,ytm-pivot-bar-renderer,ytm-mobile-topbar-renderer,.mobile-topbar-header,ytm-promoted-sparkles-web-renderer,ytm-app-promo-renderer{display:none!important;height:0!important;min-height:0!important}';
+  st.textContent = '#player-container-id,.player-container,#player,.player-size,ytm-custom-control,.html5-video-player,video,ytm-pivot-bar-renderer,ytm-mobile-topbar-renderer,.mobile-topbar-header,ytm-promoted-sparkles-web-renderer,ytm-app-promo-renderer,ytm-cinematic-container-renderer,.cinematic-container,#cinematic-container,ytm-playlist-panel-renderer,ytm-engagement-panel,ytm-bottom-sheet-renderer,[class*="playlist-panel"],[class*="engagement-panel"]{display:none!important;height:0!important;min-height:0!important;margin:0!important;padding:0!important}ytm-watch,ytm-single-column-watch-next-results-renderer,body{padding-top:0!important;margin-top:0!important}';
   document.head.appendChild(st);
   setInterval(function(){
     try { document.querySelectorAll('video').forEach(function(v){ v.muted = true; v.pause(); }); } catch (e) {}
   }, 700);
+  // Hides YouTube's fixed bottom panel (the "Mix" playlist) and any empty space the hidden player left.
+  function tidy(){
+    try {
+      var els = document.querySelectorAll('div,ytm-engagement-panel,ytm-playlist-panel-renderer,ytm-bottom-sheet-renderer');
+      for (var i = 0; i < els.length; i++) {
+        var el = els[i];
+        if (el.__tapHid || el.offsetHeight < 60) continue;
+        var pos = getComputedStyle(el).position;
+        if (pos !== 'fixed' && pos !== 'sticky') continue;
+        var r = el.getBoundingClientRect();
+        var txt = (el.textContent || '').slice(0, 400);
+        var hasList = !!el.querySelector('ytm-playlist-panel-renderer,[class*="playlist-panel"]') || /Mix\s*[–-]|Mixes are playlists|Playlist/.test(txt);
+        if (r.bottom >= window.innerHeight - 4 && r.height > 60 && hasList && !el.querySelector('ytm-pivot-bar-renderer')) {
+          el.__tapHid = 1;
+          el.style.setProperty('display', 'none', 'important');
+        }
+      }
+      var t = document.querySelector('ytm-slim-video-metadata-section-renderer,ytm-slim-video-information-renderer,.slim-video-metadata-header,h2.slim-video-information-title');
+      var node = t;
+      for (var d = 0; node && d < 8; d++, node = node.parentElement) {
+        var p = node.previousElementSibling;
+        while (p) {
+          if (p.offsetHeight > 40 && !p.querySelector('a,img,button') && (p.textContent || '').trim() === '') {
+            p.style.setProperty('display', 'none', 'important');
+          }
+          p = p.previousElementSibling;
+        }
+      }
+    } catch (e) {}
+  }
+  var tn = 0;
+  (function loop(){ tidy(); tn++; setTimeout(loop, tn < 30 ? 800 : 4000); })();
   function idOf(h){ var m = /[?&]v=([A-Za-z0-9_-]{11})/.exec(h || ''); return m ? m[1] : null; }
   function titleOf(a){
     var t = a.getAttribute('aria-label') || '';
@@ -81,7 +114,7 @@ class PlayerView extends StatefulWidget {
   State<PlayerView> createState() => _PlayerViewState();
 }
 
-class _PlayerViewState extends State<PlayerView> {
+class _PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   DownloadController get c => widget.controller;
 
   VideoPlayerController? _vc;
@@ -116,12 +149,22 @@ class _PlayerViewState extends State<PlayerView> {
   double _speed = 1.0;
   String _lastLoadedId = '';
   bool _locked = false;
+  bool _wantPlaying = false; // the user (or auto-play) wants sound; used to resume after the screen locks
+  bool _bg = false;
+  DateTime _lastKick = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastPub = DateTime.fromMillisecondsSinceEpoch(0);
+  String? _arrangedId;
+  final Random _rng = Random();
+  final Map<String, String> _titles = {};
   bool _lockHint = false;
   Timer? _lockTimer;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    c.shuffleMode.addListener(_onModeChange);
+    c.repeatMode.addListener(_onModeChange);
     c.onPlayerBack = _handleBack;
     c.playerId.addListener(_onIdChange);
     _sub = c.webActions.listen(_onAction);
@@ -131,6 +174,9 @@ class _PlayerViewState extends State<PlayerView> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    c.shuffleMode.removeListener(_onModeChange);
+    c.repeatMode.removeListener(_onModeChange);
     c.onPlayerBack = null;
     c.playerId.removeListener(_onIdChange);
     _sub?.cancel();
@@ -145,6 +191,74 @@ class _PlayerViewState extends State<PlayerView> {
     SystemChrome.setPreferredOrientations(const []);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _bg = state != AppLifecycleState.resumed;
+    if (_bg) _kick();
+  }
+
+  void _onModeChange() {
+    _arrangedId = null;
+    _preId = null;
+    _vc?.setLooping(c.repeatMode.value == 2);
+    _arrange();
+    _prefetchFirst();
+    if (mounted) setState(() {});
+  }
+
+  /// Some phones pause the picture when the screen locks; sound must go on like in any music player.
+  void _kick() {
+    final vc = _vc;
+    if (vc == null || !_wantPlaying || !_bg) return;
+    final v = vc.value;
+    if (!v.isInitialized || v.isPlaying || v.isBuffering || v.isCompleted) return;
+    final now = DateTime.now();
+    if (now.difference(_lastKick) < const Duration(milliseconds: 1500)) return;
+    _lastKick = now;
+    unawaited(vc.play());
+  }
+
+  void _publish({bool force = false}) {
+    final vc = _vc;
+    if (vc == null || !vc.value.isInitialized) return;
+    final now = DateTime.now();
+    if (!force && now.difference(_lastPub) < const Duration(seconds: 5)) return;
+    _lastPub = now;
+    final v = vc.value;
+    c.publishMedia(
+      id: _id,
+      title: _title,
+      playing: v.isPlaying,
+      positionMs: v.position.inMilliseconds,
+      durationMs: v.duration.inMilliseconds,
+    );
+  }
+
+  int _pickIndex() {
+    final n = _queue.length;
+    if (n <= 1 || c.shuffleMode.value == 0) return 0;
+    if (c.shuffleMode.value == 1) return _rng.nextInt(n);
+    // Smart shuffle: random, but favours what YouTube thinks fits best and never repeats recent songs.
+    final m = min(n, 12);
+    final w = [for (var k = 0; k < m; k++) 1 / (1 + k * 0.6)];
+    var r = _rng.nextDouble() * w.fold<double>(0, (a, b) => a + b);
+    for (var k = 0; k < m; k++) {
+      r -= w[k];
+      if (r <= 0) return k;
+    }
+    return 0;
+  }
+
+  /// Puts the song that will play next at the front, so it can be prepared early.
+  void _arrange() {
+    if (_queue.isEmpty || c.shuffleMode.value == 0) return;
+    final first = UrlUtils.videoId(_queue.first.url);
+    if (_arrangedId != null && first == _arrangedId) return;
+    final e = _queue.removeAt(_pickIndex());
+    _queue.insert(0, e);
+    _arrangedId = UrlUtils.videoId(e.url);
   }
 
   void _onIdChange() {
@@ -208,13 +322,17 @@ class _PlayerViewState extends State<PlayerView> {
         _title = (info['title'] as String?) ?? '';
       });
       await vc.setPlaybackSpeed(_speed);
+      await vc.setLooping(c.repeatMode.value == 2);
       if (resume != null) await vc.seekTo(resume);
       await vc.play();
       _skips = 0;
       _auto = false;
       _lastPlaying = true;
+      _wantPlaying = true;
+      if (_title.isNotEmpty) _titles[id] = _title;
       c.setWebPlaying(true);
       c.updatePip(ready: true, playing: true);
+      _publish(force: true);
       _showControls();
       if (_queue.length < 3 || c.audioMode.value) unawaited(_loadQueue(id, seq));
     } catch (e) {
@@ -364,10 +482,15 @@ class _PlayerViewState extends State<PlayerView> {
       _lastPlaying = v.isPlaying;
       c.setWebPlaying(v.isPlaying);
       c.updatePip(ready: v.isPlaying, playing: v.isPlaying);
+      _publish(force: true);
+    } else {
+      _publish();
     }
+    if (!v.isPlaying) _kick();
     if (!v.isInitialized || v.duration.inMilliseconds <= 0) return;
     final left = v.duration - v.position;
     if (left < const Duration(seconds: 25) && _queue.isNotEmpty) {
+      _arrange();
       final next = UrlUtils.videoId(_queue.first.url);
       if (next != null && _preId != next) {
         _preId = next;
@@ -395,10 +518,21 @@ class _PlayerViewState extends State<PlayerView> {
         } catch (_) {/* handled below */}
       }
     }
+    if (_queue.isEmpty && c.repeatMode.value == 1 && _played.length > 1) {
+      // Repeat all: start the songs played so far again.
+      final cur = _id;
+      _queue = [
+        for (final p in _played)
+          if (p != cur) PlaylistEntry(url: 'https://www.youtube.com/watch?v=$p', title: _titles[p] ?? ''),
+      ];
+      _played.clear();
+      if (cur != null) _played.add(cur);
+    }
     if (_queue.isEmpty) {
       _snack('No next video found');
       return;
     }
+    _arrange();
     final e = _queue.removeAt(0);
     final nid = UrlUtils.videoId(e.url);
     if (nid != null) unawaited(_load(nid, title: e.title));
@@ -422,8 +556,10 @@ class _PlayerViewState extends State<PlayerView> {
     final vc = _vc;
     if (vc == null) return;
     if (vc.value.isPlaying) {
+      _wantPlaying = false;
       vc.pause();
     } else {
+      _wantPlaying = true;
       final v = vc.value;
       if (v.duration.inMilliseconds > 0 && v.position >= v.duration) vc.seekTo(Duration.zero);
       vc.play();
@@ -435,10 +571,19 @@ class _PlayerViewState extends State<PlayerView> {
     switch (a) {
       case 'toggle':
         _toggle();
+      case 'toggleOn':
+        if (!(_vc?.value.isPlaying ?? true)) _toggle();
+      case 'toggleOff':
+        if (_vc?.value.isPlaying ?? false) _toggle();
       case 'prev':
         _prev();
       case 'next':
         _next();
+      default:
+        if (a.startsWith('seek:')) {
+          final ms = int.tryParse(a.substring(5));
+          if (ms != null) _vc?.seekTo(Duration(milliseconds: ms));
+        }
     }
   }
 
@@ -575,6 +720,36 @@ class _PlayerViewState extends State<PlayerView> {
       child: selected
           ? FilledButton.icon(onPressed: onTap, icon: Icon(icon, size: 18), label: Text(label))
           : FilledButton.tonalIcon(onPressed: onTap, icon: Icon(icon, size: 18), label: Text(label)),
+    );
+  }
+
+  static const _shuffleNames = ['Shuffle: off', 'Shuffle', 'Smart shuffle'];
+  static const _repeatNames = ['Repeat: off', 'Repeat all', 'Repeat one'];
+
+  Widget _shuffleChip() {
+    final m = c.shuffleMode.value;
+    return _actionChip(
+      m == 2 ? Icons.auto_awesome_rounded : Icons.shuffle_rounded,
+      _shuffleNames[m],
+      () {
+        c.setShuffleMode((m + 1) % 3);
+        _snack(const [
+          'Shuffle off: plays in order',
+          'Shuffle: any song from the list',
+          'Smart shuffle: random but similar songs, no repeats',
+        ][(m + 1) % 3]);
+      },
+      selected: m != 0,
+    );
+  }
+
+  Widget _repeatChip() {
+    final m = c.repeatMode.value;
+    return _actionChip(
+      m == 2 ? Icons.repeat_one_rounded : Icons.repeat_rounded,
+      _repeatNames[m],
+      () => c.setRepeatMode((m + 1) % 3),
+      selected: m != 0,
     );
   }
 
@@ -977,6 +1152,8 @@ class _PlayerViewState extends State<PlayerView> {
                         _toggleAudio,
                         selected: c.audioMode.value,
                       ),
+                      _shuffleChip(),
+                      _repeatChip(),
                       _actionChip(Icons.settings_rounded, 'Settings', _openSettings),
                     ],
                   ),

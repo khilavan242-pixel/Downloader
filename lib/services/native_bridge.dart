@@ -148,6 +148,16 @@ class NativeBridge {
   /// Keeps the app awake while a video plays in the background (shows a notification).
   Future<void> keepAlive(bool on) => _methods.invokeMethod<void>('keepAlive', {'on': on});
 
+  /// Lock-screen / notification media controls for the in-app player.
+  Future<void> playerMedia(String? id, String title, bool playing, int position, int duration) =>
+      _methods.invokeMethod<void>('playerMedia', {
+        'id': id,
+        'title': title,
+        'playing': playing,
+        'position': position,
+        'duration': duration,
+      });
+
   /// Tells Android whether the video window may float (picture-in-picture) when the app is left.
   Future<void> setPip({required bool ready, required bool playing}) =>
       _methods.invokeMethod<void>('setPip', {'ready': ready, 'playing': playing});

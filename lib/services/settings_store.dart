@@ -64,6 +64,14 @@ class SettingsStore {
   bool get audioMode => _prefs.getBool('player_audio') ?? false;
   set audioMode(bool v) => _prefs.setBool('player_audio', v);
 
+  /// Shuffle mode: 0 off, 1 random, 2 smart.
+  int get shuffleMode => _prefs.getInt('player_shuffle') ?? 0;
+  set shuffleMode(int v) => _prefs.setInt('player_shuffle', v);
+
+  /// Repeat mode: 0 off, 1 all, 2 one.
+  int get repeatMode => _prefs.getInt('player_repeat') ?? 0;
+  set repeatMode(int v) => _prefs.setInt('player_repeat', v);
+
   // ---- Settings page ----------------------------------------------------------
 
   /// `original`, `clean` or `short`.

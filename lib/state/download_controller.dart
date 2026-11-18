@@ -166,6 +166,24 @@ class DownloadController extends ChangeNotifier {
     playerHeight.value = h;
   }
 
+  late final ValueNotifier<int> shuffleMode = ValueNotifier<int>(_settings.shuffleMode);
+  late final ValueNotifier<int> repeatMode = ValueNotifier<int>(_settings.repeatMode);
+
+  void setShuffleMode(int m) {
+    _settings.shuffleMode = m;
+    shuffleMode.value = m;
+  }
+
+  void setRepeatMode(int m) {
+    _settings.repeatMode = m;
+    repeatMode.value = m;
+  }
+
+  /// Shows the song on the lock screen / notification with working controls.
+  void publishMedia({String? id, required String title, required bool playing, required int positionMs, required int durationMs}) {
+    unawaited(_bridge.playerMedia(id, title, playing, positionMs, durationMs).catchError((_) {}));
+  }
+
   void setAudioMode(bool on) {
     _settings.audioMode = on;
     audioMode.value = on;
@@ -225,7 +243,7 @@ class DownloadController extends ChangeNotifier {
     } else {
       // Stay alive for a while after a pause, so Play from the notification still works.
       _keepTimer?.cancel();
-      _keepTimer = Timer(const Duration(seconds: 120), () {
+      _keepTimer = Timer(const Duration(minutes: 10), () {
         if (_webPlaying || !_keeping) return;
         _keeping = false;
         unawaited(_bridge.keepAlive(false).catchError((_) {}));

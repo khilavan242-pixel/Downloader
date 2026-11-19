@@ -118,6 +118,7 @@ class CastService : Service() {
         const val ACTION_STOP = "com.tapnab.app.cast.STOP"
 
         @Volatile private var running = false
+        fun isRunning(): Boolean = running
         @Volatile private var lastState: Map<String, Any?>? = null
         @Volatile private var thumbKey: String? = null
         @Volatile private var thumb: Bitmap? = null

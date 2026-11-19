@@ -48,6 +48,19 @@ const _feedScript = r'''
         }
       }
       var t = document.querySelector('ytm-slim-video-metadata-section-renderer,ytm-slim-video-information-renderer,.slim-video-metadata-header,h2.slim-video-information-title');
+      if (!t) {
+        var nm = (document.title || '').replace(/\s*-\s*YouTube\s*$/, '').trim().slice(0, 18);
+        if (nm.length > 5) {
+          var hs = document.querySelectorAll('h1,h2,h3,yt-formatted-string,span');
+          for (var q = 0; q < hs.length; q++) {
+            if (hs[q].children.length < 3 && (hs[q].textContent || '').trim().indexOf(nm) === 0 && hs[q].offsetHeight > 10) { t = hs[q]; break; }
+          }
+        }
+        if (t) {
+          var topLeaf = t.getBoundingClientRect().top;
+          while (t.parentElement && t.parentElement !== document.body && Math.abs(t.parentElement.getBoundingClientRect().top - topLeaf) < 3) t = t.parentElement;
+        }
+      }
       if (t && window.scrollY < 5) {
         var adj = t.__tapAdj || 0;
         var top = t.getBoundingClientRect().top + window.scrollY + adj;
@@ -339,7 +352,7 @@ class _PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       _wantPlaying = true;
       if (_title.isNotEmpty) _titles[id] = _title;
       c.setWebPlaying(true);
-      c.updatePip(ready: true, playing: true);
+      c.updatePip(ready: !c.audioMode.value, playing: true);
       _publish(force: true);
       _showControls();
       if (_queue.length < 3 || c.audioMode.value) unawaited(_loadQueue(id, seq));
@@ -489,7 +502,7 @@ class _PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     if (v.isPlaying != _lastPlaying) {
       _lastPlaying = v.isPlaying;
       c.setWebPlaying(v.isPlaying);
-      c.updatePip(ready: v.isPlaying, playing: v.isPlaying);
+      c.updatePip(ready: v.isPlaying && !c.audioMode.value, playing: v.isPlaying);
       _publish(force: true);
     } else {
       _publish();
@@ -587,6 +600,8 @@ class _PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         _prev();
       case 'next':
         _next();
+      case 'close':
+        _close();
       default:
         if (a.startsWith('seek:')) {
           final ms = int.tryParse(a.substring(5));
@@ -764,6 +779,7 @@ class _PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   void _toggleAudio() {
     final on = !c.audioMode.value;
     c.setAudioMode(on);
+    c.updatePip(ready: !on && (_vc?.value.isPlaying ?? false), playing: _vc?.value.isPlaying ?? false);
     if (on) {
       _feed?.loadRequest(Uri.parse('about:blank'));
       _feed?.removeJavaScriptChannel('TapnabFeed').catchError((_) {});
@@ -963,7 +979,8 @@ class _PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                     icon: const Icon(Icons.settings_rounded, color: Colors.white),
                     tooltip: 'Settings',
                   ),
-                  IconButton(
+                  if (!c.audioMode.value)
+                    IconButton(
                     onPressed: () => c.enterPip(),
                     icon: const Icon(Icons.picture_in_picture_alt_rounded, color: Colors.white),
                     tooltip: 'Floating window',

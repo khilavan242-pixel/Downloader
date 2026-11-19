@@ -88,7 +88,14 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       return;
     }
     // Leaving with a video playing floats it over other apps, like the YouTube app.
-    if (c.playerId.value != null && await c.enterPip()) return;
+    if (c.playerId.value != null) {
+      // Sound-only: keep playing from the notification, no floating window.
+      if (c.audioMode.value) {
+        if (await c.moveToBack()) return;
+      } else if (await c.enterPip() || await c.moveToBack()) {
+        return;
+      }
+    }
     await SystemNavigator.pop();
   }
 

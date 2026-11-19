@@ -243,7 +243,7 @@ class DownloadController extends ChangeNotifier {
     } else {
       // Stay alive for a while after a pause, so Play from the notification still works.
       _keepTimer?.cancel();
-      _keepTimer = Timer(const Duration(minutes: 10), () {
+      _keepTimer = Timer(const Duration(minutes: 3), () {
         if (_webPlaying || !_keeping) return;
         _keeping = false;
         unawaited(_bridge.keepAlive(false).catchError((_) {}));
@@ -257,6 +257,8 @@ class DownloadController extends ChangeNotifier {
   }
 
   Future<bool> enterPip() => _bridge.enterPip();
+
+  Future<bool> moveToBack() => _bridge.moveToBack();
 
   /// Picture for a file on the phone, cached.
   Future<Uint8List?> thumbFor(String uri) => _thumbs.putIfAbsent(uri, () => _bridge.mediaThumb(uri));

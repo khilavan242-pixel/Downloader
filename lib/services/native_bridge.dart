@@ -177,6 +177,9 @@ class NativeBridge {
     return {for (final e in (raw ?? const {}).entries) e.key.toString(): e.value};
   }
 
+  /// Sends the app to the background without closing it (keeps the sound playing).
+  Future<bool> moveToBack() async => (await _methods.invokeMethod<bool>('moveToBack')) ?? false;
+
   Future<bool> enterPip() async => (await _methods.invokeMethod<bool>('enterPip')) ?? false;
 
   /// Picture for a file on the phone (album art, thumbnail or a video frame), or null.

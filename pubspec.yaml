@@ -1,7 +1,7 @@
 name: tapnab
 description: One-tap MP3 / MP4 downloader for Android, powered by yt-dlp. Share a link, pick a quality, done.
 publish_to: "none"
-version: 1.10.3+21
+version: 1.11.0+22
 
 environment:
   sdk: ">=3.5.0 <4.0.0"

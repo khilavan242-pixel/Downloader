@@ -33,6 +33,14 @@ class DownloadService : Service() {
         return START_NOT_STICKY
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        if (DownloadManager.activeCount() == 0) {
+            stopSelf()
+            PlaybackService.exitIfIdle(applicationContext)
+        }
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onDestroy() {
         instance = null
         super.onDestroy()

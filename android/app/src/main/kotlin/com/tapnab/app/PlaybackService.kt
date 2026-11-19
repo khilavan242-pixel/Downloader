@@ -66,6 +66,13 @@ class PlaybackService : Service() {
         return START_NOT_STICKY
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        // Swiped away from recent apps: the player goes with the screen, so close completely.
+        stopSelf()
+        exitIfIdle(applicationContext)
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onDestroy() {
         try {
             wake?.takeIf { it.isHeld }?.release()
@@ -87,6 +94,34 @@ class PlaybackService : Service() {
         const val ACTION_WEB_TOGGLE = "com.tapnab.app.web.TOGGLE"
         const val ACTION_WEB_PREV = "com.tapnab.app.web.PREV"
         const val ACTION_WEB_NEXT = "com.tapnab.app.web.NEXT"
+        const val ACTION_WEB_CLOSE = "com.tapnab.app.web.CLOSE"
+
+        /** Ends the process when nothing else (downloads, casting) needs it, so Tapnab is fully closed. */
+        fun exitIfIdle(context: Context) {
+            if (DownloadManager.activeCount() == 0 && !CastService.isRunning()) {
+                try {
+                    context.stopService(Intent(context, PlaybackService::class.java))
+                } catch (e: Exception) {
+                    // ignore
+                }
+                android.os.Process.killProcess(android.os.Process.myPid())
+            }
+        }
+
+        /** The X button: stop playing, close the screen and leave completely. */
+        fun closeAll(context: Context) {
+            val app = context.applicationContext
+            DlnaCaster.emitExternal(mapOf("type" to "web", "action" to "close"))
+            Handler(Looper.getMainLooper()).postDelayed({
+                try {
+                    stop(app)
+                    MainActivity.current?.finishAndRemoveTask()
+                } catch (e: Exception) {
+                    // ignore
+                }
+                Handler(Looper.getMainLooper()).postDelayed({ exitIfIdle(app) }, 400)
+            }, 250)
+        }
 
         @Volatile private var title = "Tapnab"
         @Volatile private var videoId: String? = null
@@ -170,7 +205,7 @@ class PlaybackService : Service() {
                 override fun onSkipToNext() = emit("next")
                 override fun onSkipToPrevious() = emit("prev")
                 override fun onSeekTo(pos: Long) = emit("seek:" + pos)
-                override fun onStop() = emit("toggleOff")
+                override fun onStop() = closeAll(app)
             }, Handler(Looper.getMainLooper()))
             s.isActive = true
             session = s
@@ -265,6 +300,7 @@ class PlaybackService : Service() {
                     else button(context, R.drawable.ic_play, "Play", 12, ACTION_WEB_TOGGLE),
                 )
                 .addAction(button(context, R.drawable.ic_next, "Next", 13, ACTION_WEB_NEXT))
+                .addAction(button(context, R.drawable.ic_close, "Close", 14, ACTION_WEB_CLOSE))
                 .setStyle(style)
             if (videoId == thumbKey) thumb?.let { b.setLargeIcon(it) }
             return b.build()

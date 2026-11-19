@@ -46,6 +46,7 @@ class MainActivity : FlutterActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        current = this
         folders = FolderStore(this)
         captureShared(intent)
         requestNotificationPermission()
@@ -409,6 +410,10 @@ class MainActivity : FlutterActivity() {
                 }
             }
 
+            "moveToBack" -> {
+                result.success(moveTaskToBack(true))
+            }
+
             "enterPip" -> {
                 result.success(enterPip())
             }
@@ -637,8 +642,14 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private companion object {
-        const val REQUEST_FOLDER = 4201
-        const val REQUEST_MEDIA = 4202
+    override fun onDestroy() {
+        if (current === this) current = null
+        super.onDestroy()
+    }
+
+    companion object {
+        @Volatile var current: MainActivity? = null
+        private const val REQUEST_FOLDER = 4201
+        private const val REQUEST_MEDIA = 4202
     }
 }

@@ -170,7 +170,7 @@ object DlnaCaster {
         val req = com.yausername.youtubedl_android.YoutubeDLRequest(pageUrl).apply {
             addOption("--no-playlist")
             addOption("--no-warnings")
-            addOption("--extractor-args", "youtube:player_client=ios")
+            addOption("--extractor-args", "youtube:player_client=ios;skip=dash,translated_subs")
             addOption(
                 "-f",
                 "best[protocol^=m3u8][height<=$maxHeight]/best[protocol^=m3u8]/best[acodec!=none][vcodec!=none][height<=$maxHeight]",

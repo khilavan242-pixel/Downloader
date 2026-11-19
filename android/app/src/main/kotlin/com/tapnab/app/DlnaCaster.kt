@@ -153,6 +153,14 @@ object DlnaCaster {
     /** Finds a direct, ready-to-play address for a YouTube link. Call off the main thread. */
     /** Title, direct address and length (seconds) of a YouTube video, for the in-app player. */
     fun resolveForPlayer(pageUrl: String, legacy: Boolean, audioOnly: Boolean, maxHeight: Int): Triple<String, String, Int> {
+        if (!legacy) {
+            // Fastest way first (a single quick request); the slower ones below are the safety net.
+            try {
+                return resolveDirect(pageUrl, audioOnly, maxHeight)
+            } catch (e: Exception) {
+                Log.w("Tapnab", "direct resolve failed: " + e.message)
+            }
+        }
         if (audioOnly) return resolveStream(pageUrl, true, 720)
         if (!legacy) {
             try {
@@ -162,6 +170,78 @@ object DlnaCaster {
             }
         }
         return resolveStream(pageUrl, false, maxHeight)
+    }
+
+    /** One quick request to YouTube as the iOS app does; picks a streaming quality that saves data. */
+    private fun resolveDirect(pageUrl: String, audioOnly: Boolean, maxHeight: Int): Triple<String, String, Int> {
+        val id = Regex("(?:v=|youtu\\.be/|shorts/|embed/)([A-Za-z0-9_-]{11})").find(pageUrl)?.groupValues?.get(1)
+            ?: throw IOException("no video id")
+        val ua = "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)"
+        val client = org.json.JSONObject()
+            .put("clientName", "IOS").put("clientVersion", "20.10.4")
+            .put("deviceMake", "Apple").put("deviceModel", "iPhone16,2")
+            .put("osName", "iPhone").put("osVersion", "18.3.2.22D82")
+            .put("hl", "en").put("gl", "US")
+        val body = org.json.JSONObject().put("videoId", id)
+            .put("contentCheckOk", true).put("racyCheckOk", true)
+            .put("context", org.json.JSONObject().put("client", client))
+        val conn = URL("https://youtubei.googleapis.com/youtubei/v1/player?prettyPrint=false")
+            .openConnection() as java.net.HttpURLConnection
+        val text: String
+        try {
+            conn.requestMethod = "POST"
+            conn.connectTimeout = 4000
+            conn.readTimeout = 5000
+            conn.doOutput = true
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.setRequestProperty("User-Agent", ua)
+            conn.setRequestProperty("X-YouTube-Client-Name", "5")
+            conn.setRequestProperty("X-YouTube-Client-Version", "20.10.4")
+            conn.outputStream.use { it.write(body.toString().toByteArray()) }
+            if (conn.responseCode != 200) throw IOException("player HTTP " + conn.responseCode)
+            text = conn.inputStream.bufferedReader().use { it.readText() }
+        } finally {
+            conn.disconnect()
+        }
+        val j = org.json.JSONObject(text)
+        val status = j.optJSONObject("playabilityStatus")?.optString("status")
+        if (status != "OK") throw IOException("not playable: $status")
+        val title = j.optJSONObject("videoDetails")?.optString("title").orEmpty().ifBlank { "Video" }
+        val seconds = j.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toIntOrNull() ?: 0
+        val hls = j.optJSONObject("streamingData")?.optString("hlsManifestUrl").orEmpty()
+        if (!hls.startsWith("http")) throw IOException("no streaming playlist")
+        val c2 = URL(hls).openConnection() as java.net.HttpURLConnection
+        val manifest: String
+        try {
+            c2.connectTimeout = 4000
+            c2.readTimeout = 5000
+            c2.setRequestProperty("User-Agent", ua)
+            if (c2.responseCode != 200) throw IOException("playlist HTTP " + c2.responseCode)
+            manifest = c2.inputStream.bufferedReader().use { it.readText() }
+        } finally {
+            c2.disconnect()
+        }
+        var bestUrl: String? = null
+        var bestScore = if (audioOnly) Long.MAX_VALUE else -1L
+        val lines = manifest.lines()
+        for (i in lines.indices) {
+            val l = lines[i]
+            if (!l.startsWith("#EXT-X-STREAM-INF")) continue
+            val url = lines.getOrNull(i + 1)?.trim().orEmpty()
+            if (!url.startsWith("http")) continue
+            val height = Regex("RESOLUTION=\\d+x(\\d+)").find(l)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+            val bw = Regex("BANDWIDTH=(\\d+)").find(l)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+            if (audioOnly) {
+                if (bw in 1 until bestScore) { bestScore = bw; bestUrl = url }
+            } else if (height in 1..maxHeight.toLong() && height > bestScore) {
+                bestScore = height; bestUrl = url
+            }
+        }
+        if (bestUrl == null && !audioOnly) {
+            // nothing small enough: take the first listed
+            bestUrl = lines.firstOrNull { it.startsWith("http") }?.trim()
+        }
+        return Triple(title, bestUrl ?: throw IOException("no stream variant"), seconds)
     }
 
     /** Quick way: the iOS client lists a streaming playlist (picture + sound) without downloading YouTube's player code. */

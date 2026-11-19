@@ -153,7 +153,7 @@ object DlnaCaster {
     /** Finds a direct, ready-to-play address for a YouTube link. Call off the main thread. */
     /** Title, direct address and length (seconds) of a YouTube video, for the in-app player. */
     fun resolveForPlayer(pageUrl: String, legacy: Boolean, audioOnly: Boolean, maxHeight: Int): Triple<String, String, Int> {
-        if (audioOnly) return resolveStream(pageUrl, true, 720, true)
+        if (audioOnly) return resolveStream(pageUrl, true, 720)
         if (!legacy) {
             try {
                 return resolveFast(pageUrl, maxHeight)
@@ -161,7 +161,7 @@ object DlnaCaster {
                 // fall back to the slower, more widely working way below
             }
         }
-        return resolveStream(pageUrl, false, maxHeight, true)
+        return resolveStream(pageUrl, false, maxHeight)
     }
 
     /** Quick way: the iOS client lists a streaming playlist (picture + sound) without downloading YouTube's player code. */
@@ -187,11 +187,11 @@ object DlnaCaster {
         return Triple(parts[0], parts[2], parts[1].toDoubleOrNull()?.toInt() ?: 0)
     }
 
-    private fun resolveStream(pageUrl: String, audioOnly: Boolean, maxHeight: Int = 720, vrFirst: Boolean = false): Triple<String, String, Int> {
+    private fun resolveStream(pageUrl: String, audioOnly: Boolean, maxHeight: Int = 720: Triple<String, String, Int> {
         TapnabApp.awaitReady()
         // YouTube sometimes offers no formats to one kind of client ("Requested format is not available"):
         // try several, the first one that gives an address wins.
-        val clients = if (vrFirst) listOf("android_vr", null, "tv", "mweb", "web_safari") else listOf(null, "android_vr", "tv", "mweb", "web_safari")
+        val clients = listOf(null, "tv", "mweb", "web_safari", "android_vr")
         var last: Exception? = null
         for (client in clients) {
             try {

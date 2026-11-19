@@ -187,7 +187,7 @@ object DlnaCaster {
         return Triple(parts[0], parts[2], parts[1].toDoubleOrNull()?.toInt() ?: 0)
     }
 
-    private fun resolveStream(pageUrl: String, audioOnly: Boolean, maxHeight: Int = 720: Triple<String, String, Int> {
+    private fun resolveStream(pageUrl: String, audioOnly: Boolean, maxHeight: Int = 720): Triple<String, String, Int> {
         TapnabApp.awaitReady()
         // YouTube sometimes offers no formats to one kind of client ("Requested format is not available"):
         // try several, the first one that gives an address wins.

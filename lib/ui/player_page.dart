@@ -48,6 +48,14 @@ const _feedScript = r'''
         }
       }
       var t = document.querySelector('ytm-slim-video-metadata-section-renderer,ytm-slim-video-information-renderer,.slim-video-metadata-header,h2.slim-video-information-title');
+      if (t && window.scrollY < 5) {
+        var adj = t.__tapAdj || 0;
+        var top = t.getBoundingClientRect().top + window.scrollY + adj;
+        if (top > 90) {
+          var want = Math.round(top - 8);
+          if (want !== adj) { t.__tapAdj = want; t.style.setProperty('margin-top', (-want) + 'px', 'important'); }
+        }
+      }
       var node = t;
       for (var d = 0; node && d < 8; d++, node = node.parentElement) {
         var p = node.previousElementSibling;

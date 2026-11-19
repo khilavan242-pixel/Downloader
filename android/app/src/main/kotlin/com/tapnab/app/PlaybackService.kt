@@ -11,9 +11,6 @@ import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.drawable.Icon
-import android.media.AudioAttributes
-import android.media.AudioFocusRequest
-import android.media.AudioManager
 import android.media.MediaMetadata
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
@@ -80,7 +77,6 @@ class PlaybackService : Service() {
         wifi = null
         instance = null
         releaseSession()
-        abandonFocus()
         super.onDestroy()
     }
 
@@ -102,7 +98,6 @@ class PlaybackService : Service() {
         @Volatile private var thumbLoading: String? = null
         private var session: MediaSession? = null
         private var metaKey: String? = null
-        private var focusRequest: AudioFocusRequest? = null
 
         fun start(context: Context) {
             ContextCompat.startForegroundService(context, Intent(context, PlaybackService::class.java))
@@ -124,9 +119,8 @@ class PlaybackService : Service() {
                 thumb = null
                 thumbKey = null
             }
-            val svc = instance ?: return
+            if (instance == null) return
             applySession(app)
-            if (isPlaying) svc.requestFocus()
             try {
                 val nm = app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
                 nm.notify(NOTIFICATION_ID, build(app))
@@ -275,44 +269,5 @@ class PlaybackService : Service() {
             if (videoId == thumbKey) thumb?.let { b.setLargeIcon(it) }
             return b.build()
         }
-    }
-
-    // ---- audio focus: other apps pause us and we pause for calls, like any player ----
-
-    private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
-        if (change == AudioManager.AUDIOFOCUS_LOSS || change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
-            if (playing) emit("toggleOff")
-            focusRequest = null
-        }
-    }
-
-    private fun requestFocus() {
-        if (focusRequest != null) return
-        try {
-            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-            val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-                .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                        .build(),
-                )
-                .setOnAudioFocusChangeListener(focusListener)
-                .build()
-            am.requestAudioFocus(req)
-            focusRequest = req
-        } catch (e: Exception) {
-            // playback still works without it
-        }
-    }
-
-    private fun abandonFocus() {
-        try {
-            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-            focusRequest?.let { am.abandonAudioFocusRequest(it) }
-        } catch (e: Exception) {
-            // ignore
-        }
-        focusRequest = null
     }
 }

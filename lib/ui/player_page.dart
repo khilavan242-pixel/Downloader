@@ -167,6 +167,8 @@ class _PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   StreamSubscription<String>? _sub;
   WebViewController? _feed;
   String _feedId = '';
+  final List<PlaylistEntry> _related = [];
+  DateTime _lastMore = DateTime.fromMillisecondsSinceEpoch(0);
   double _speed = 1.0;
   String _lastLoadedId = '';
   bool _locked = false;
@@ -377,6 +379,7 @@ class _PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     final key = '$id|${c.playerListId}';
     if (_feedId == key && _feed != null) return;
     _feedId = key;
+    _related.clear();
     var feed = _feed;
     if (feed == null) {
       feed = WebViewController()
@@ -410,6 +413,7 @@ class _PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         if (id is String) {
           final t = j['title'];
           _queue.removeWhere((e) => UrlUtils.videoId(e.url) == id);
+          _related.removeWhere((e) => UrlUtils.videoId(e.url) == id);
           unawaited(_load(id, title: t is String ? t : null));
         }
       } else if (j['t'] == 'related') {
@@ -426,6 +430,16 @@ class _PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         if (list.isEmpty) return;
         _queue = list;
         _prefetchFirst();
+        final seen = {for (final e in _related) UrlUtils.videoId(e.url)};
+        var changed = false;
+        for (final e in list) {
+          if (_related.length >= 80) break;
+          if (seen.add(UrlUtils.videoId(e.url))) {
+            _related.add(e);
+            changed = true;
+          }
+        }
+        if (changed && mounted) setState(() {});
       }
     } catch (_) {/* ignore malformed messages */}
   }
@@ -789,6 +803,103 @@ class _PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       _ensureFeed(_id!);
     }
     _reloadHere();
+  }
+
+  void _loadMoreRelated() {
+    final f = _feed;
+    if (f == null || c.playerListId != null) return;
+    final now = DateTime.now();
+    if (now.difference(_lastMore) < const Duration(milliseconds: 1500)) return;
+    _lastMore = now;
+    unawaited(
+      f
+          .runJavaScript(
+            "try{var x=document.querySelector('ytm-continuation-item-renderer');if(x)x.scrollIntoView();window.scrollTo(0,document.documentElement.scrollHeight);}catch(e){}",
+          )
+          .catchError((_) {}),
+    );
+  }
+
+  /// The list under the video: big thumbnails, scrolls smoothly like the YouTube app.
+  Widget _relatedList() {
+    final items = c.playerListId != null ? _queue : _related;
+    final theme = Theme.of(context);
+    return NotificationListener<ScrollNotification>(
+      onNotification: (n) {
+        if (n.metrics.extentAfter < 900) _loadMoreRelated();
+        return false;
+      },
+      child: ListView.builder(
+        padding: const EdgeInsets.only(bottom: 24),
+        itemCount: items.length + 1,
+        itemBuilder: (ctx, i) {
+          if (i == 0) {
+            return Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(_title, style: theme.textTheme.titleMedium),
+                  const SizedBox(height: 12),
+                  Text(items.isEmpty ? 'Loading more videos…' : 'Up next', style: theme.textTheme.titleSmall),
+                ],
+              ),
+            );
+          }
+          final e = items[i - 1];
+          final id = UrlUtils.videoId(e.url);
+          return InkWell(
+            onTap: id == null
+                ? null
+                : () {
+                    _queue.removeWhere((q) => UrlUtils.videoId(q.url) == id);
+                    _related.removeWhere((q) => UrlUtils.videoId(q.url) == id);
+                    unawaited(_load(id, title: e.title));
+                  },
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (id != null)
+                  AspectRatio(
+                    aspectRatio: 16 / 9,
+                    child: Image.network(
+                      'https://i.ytimg.com/vi/$id/hqdefault.jpg',
+                      fit: BoxFit.cover,
+                      cacheWidth: 720,
+                      errorBuilder: (_, __, ___) => const ColoredBox(color: Color(0xFF222222)),
+                    ),
+                  ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 8, 0, 14),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          e.title.trim().isEmpty ? 'Video' : e.title,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.bodyLarge,
+                        ),
+                      ),
+                      if (id != null)
+                        PopupMenuButton<int>(
+                          icon: const Icon(Icons.more_vert_rounded),
+                          tooltip: 'Download',
+                          onSelected: (v) => c.downloadVideo(id, v == 0 ? MediaKind.mp4 : MediaKind.mp3),
+                          itemBuilder: (_) => const [
+                            PopupMenuItem(value: 0, child: Text('Download video')),
+                            PopupMenuItem(value: 1, child: Text('Download MP3')),
+                          ],
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
   }
 
   Widget _audioList() {
@@ -1195,7 +1306,15 @@ class _PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                     ),
                   ),
                 Expanded(
-                  child: (c.audioMode.value || _feed == null) ? _audioList() : WebViewWidget(controller: _feed!),
+                  child: (c.audioMode.value || _feed == null)
+                      ? _audioList()
+                      : Stack(
+                          children: [
+                            // The YouTube page keeps running underneath only to find related videos.
+                            WebViewWidget(controller: _feed!),
+                            Positioned.fill(child: Material(color: scheme.surface, child: _relatedList())),
+                          ],
+                        ),
                 ),
               ],
             ),

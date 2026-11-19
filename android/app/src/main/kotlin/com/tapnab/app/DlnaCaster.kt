@@ -153,7 +153,7 @@ object DlnaCaster {
     /** Finds a direct, ready-to-play address for a YouTube link. Call off the main thread. */
     /** Title, direct address and length (seconds) of a YouTube video, for the in-app player. */
     fun resolveForPlayer(pageUrl: String, legacy: Boolean, audioOnly: Boolean, maxHeight: Int): Triple<String, String, Int> {
-        if (audioOnly) return resolveStream(pageUrl, true)
+        if (audioOnly) return resolveStream(pageUrl, true, 720, true)
         if (!legacy) {
             try {
                 return resolveFast(pageUrl, maxHeight)
@@ -161,7 +161,7 @@ object DlnaCaster {
                 // fall back to the slower, more widely working way below
             }
         }
-        return resolveStream(pageUrl, false, maxHeight)
+        return resolveStream(pageUrl, false, maxHeight, true)
     }
 
     /** Quick way: the iOS client lists a streaming playlist (picture + sound) without downloading YouTube's player code. */
@@ -187,13 +187,29 @@ object DlnaCaster {
         return Triple(parts[0], parts[2], parts[1].toDoubleOrNull()?.toInt() ?: 0)
     }
 
-    private fun resolveStream(pageUrl: String, audioOnly: Boolean, maxHeight: Int = 720): Triple<String, String, Int> {
+    private fun resolveStream(pageUrl: String, audioOnly: Boolean, maxHeight: Int = 720, vrFirst: Boolean = false): Triple<String, String, Int> {
         TapnabApp.awaitReady()
+        // YouTube sometimes offers no formats to one kind of client ("Requested format is not available"):
+        // try several, the first one that gives an address wins.
+        val clients = if (vrFirst) listOf("android_vr", null, "tv", "mweb", "web_safari") else listOf(null, "android_vr", "tv", "mweb", "web_safari")
+        var last: Exception? = null
+        for (client in clients) {
+            try {
+                return resolveWith(pageUrl, audioOnly, maxHeight, client)
+            } catch (e: Exception) {
+                last = e
+            }
+        }
+        throw last ?: IOException("Could not get a playable address for this video.")
+    }
+
+    private fun resolveWith(pageUrl: String, audioOnly: Boolean, maxHeight: Int, client: String?): Triple<String, String, Int> {
         val req = com.yausername.youtubedl_android.YoutubeDLRequest(pageUrl).apply {
             addOption("--no-playlist")
             addOption("--no-warnings")
+            if (client != null) addOption("--extractor-args", "youtube:player_client=$client")
             if (audioOnly) {
-                addOption("-f", "bestaudio[ext=m4a]/bestaudio")
+                addOption("-f", "bestaudio[ext=m4a]/bestaudio/best[acodec!=none]/best")
             } else {
                 // One file with picture and sound together (TVs cannot join two streams).
                 addOption(
